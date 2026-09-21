@@ -1,6 +1,15 @@
-"""冒烟测试：验证导入与关键逻辑（不依赖网络）。"""
-from app.main import app
-from app import downloader
+"""冒烟测试：验证导入与关键逻辑（不依赖网络）。
+
+运行：python tests/test_smoke.py
+"""
+import sys
+from pathlib import Path
+
+# 将项目根目录加入 sys.path，保证从任意位置运行都能导入 backend 包
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from backend.main import app  # noqa: E402
+from backend import downloader  # noqa: E402
 
 print("import ok")
 print("routes:", [r.path for r in app.routes if hasattr(r, "path")])

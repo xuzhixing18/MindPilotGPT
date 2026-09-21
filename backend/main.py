@@ -4,14 +4,16 @@
 - GET  /api/info     解析视频链接，返回标题/封面/可选清晰度
 - POST /api/download 服务端下载并流式回传文件（手机/网页均可保存）
 
-同时托管 app/static 下的单页前端（模仿 BibiGPT 风格）。
+同时托管项目根目录 frontend/ 下的单页前端。
 
-启动：
-    uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+启动（在项目根目录执行）：
+    python -m backend.main
+    # 或：uvicorn backend.main:app --reload --host 0.0.0.0 --port 8010
 """
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 from fastapi import Body, FastAPI, HTTPException, Query
@@ -20,9 +22,18 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.background import BackgroundTask
 
-from app import downloader
+# 兼容两种运行方式：
+#   1) 包方式：python -m backend.main / uvicorn backend.main:app
+#   2) 脚本方式：python backend/main.py（此时无包上下文，相对导入会失败）
+# 脚本方式下把项目根目录注入 sys.path，改用绝对导入即可两种都可用。
+_ROOT = Path(__file__).resolve().parent.parent
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
 
-STATIC_DIR = Path(__file__).parent / "static"
+from backend import downloader
+
+# 前端静态目录：项目根目录下的 frontend/
+FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
 
 app = FastAPI(title="MindPilot 视频下载", version="0.1.0")
 
@@ -101,4 +112,11 @@ def _download_response(url: str, format_id: str | None) -> FileResponse:
 
 
 # 静态前端（放在最后，避免覆盖 /api 路由）
-app.mount("/", StaticFiles(directory=str(STATIC_DIR), html=True), name="static")
+app.mount("/", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="static")
+
+
+if __name__ == "__main__":
+    # 支持 `python -m backend.main` 直接启动（需在项目根目录运行）
+    import uvicorn
+
+    uvicorn.run(app, host="0.0.0.0", port=8010, reload=False)
