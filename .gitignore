@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 测试产物
+test_download.*
+e2e_download.*
+
+# IDE
+.idea/
+.vscode/

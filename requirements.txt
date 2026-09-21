@@ -1,0 +1,5 @@
+fastapi>=0.141.1
+uvicorn[standard]>=0.53.0
+yt-dlp>=2026.8.19
+# 内置 ffmpeg 二进制，用于合并音视频（B站/YouTube 高清必需），零配置无需单独安装
+imageio-ffmpeg>=0.6.0
