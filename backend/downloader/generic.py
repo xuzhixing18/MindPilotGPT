@@ -1,57 +1,29 @@
-"""yt-dlp 封装层。
+"""通用（默认）解析下载器 —— 基于 yt-dlp。
+
+覆盖绝大多数平台的兜底通道：不修改 yt-dlp 源码，仅通过其官方 Python API
+(YoutubeDL) 调用。对外暴露 extract_info / download，返回结构与各专用解析器
+（如 douyin）保持同构，由包门面 backend/downloader/__init__.py 统一调度。
 
 设计原则（遵循需求「站在巨人肩膀上，直接封装，尽量减少代码改动」）：
-- 不修改 yt-dlp 源码，仅通过其官方 Python API (YoutubeDL) 调用；
-- 对外暴露两个简单能力：解析视频信息 (extract_info) 与服务端下载 (download)；
 - 网页/手机端无法直接访问服务器文件系统，因此下载采用「服务端下载到临时目录
-  → 由接口流式回传给浏览器」的方式，用后即清理。
+  → 由接口流式回传给浏览器」的方式，用后即清理；
+- 需要平台专用逻辑时，新增独立模块（如 douyin.py）并在 registry 注册即可，
+  无需改动本文件。
 """
 
 from __future__ import annotations
 
-import shutil
-import tempfile
 import uuid
-from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
 from yt_dlp import YoutubeDL
-from yt_dlp.utils import DownloadError, sanitize_filename
+from yt_dlp.utils import DownloadError
+
+from backend.downloader import common
 
 # 下载临时目录：所有服务端下载文件先落到这里，回传完成后清理
-DOWNLOAD_DIR = Path(tempfile.gettempdir()) / "mindpilot_downloads"
-DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
-
-
-@lru_cache(maxsize=1)
-def _ffmpeg_path() -> str | None:
-    """探测可用的 ffmpeg 可执行文件路径。
-
-    优先级：系统 PATH 上的 ffmpeg → pip 包 imageio-ffmpeg 内置的二进制。
-    后者让项目「零配置、无需管理员权限」即可合并音视频，保持轻量。
-    """
-    sys_ffmpeg = shutil.which("ffmpeg")
-    if sys_ffmpeg:
-        return sys_ffmpeg
-    try:
-        import imageio_ffmpeg
-
-        bundled = imageio_ffmpeg.get_ffmpeg_exe()
-        if bundled and Path(bundled).exists():
-            return bundled
-    except Exception:  # noqa: BLE001 imageio-ffmpeg 未安装或获取失败时忽略
-        pass
-    return None
-
-
-def ffmpeg_available() -> bool:
-    """是否具备 ffmpeg 能力（用于合并「纯视频流 + 纯音频流」）。
-
-    B站 / YouTube 等平台高清视频普遍采用音视频分离（DASH），
-    需要 ffmpeg 合并；具备后即可解锁完整清晰度选项。
-    """
-    return _ffmpeg_path() is not None
+DOWNLOAD_DIR = common.DOWNLOAD_DIR
 
 
 def _base_opts() -> dict[str, Any]:
@@ -70,7 +42,7 @@ def _base_opts() -> dict[str, Any]:
             ),
         },
     }
-    ffmpeg = _ffmpeg_path()
+    ffmpeg = common.ffmpeg_path()
     if ffmpeg:
         # 指向探测到的 ffmpeg（含 imageio-ffmpeg 内置二进制）
         opts["ffmpeg_location"] = ffmpeg
@@ -96,7 +68,7 @@ def _collect_formats(info: dict[str, Any]) -> list[dict[str, Any]]:
     优先返回「含声音的单文件」(progressive)，这类无需 ffmpeg 即可直接下载。
     若系统装有 ffmpeg，则额外返回高清「纯视频流」选项（下载时会自动合并音频）。
     """
-    has_ffmpeg = ffmpeg_available()
+    has_ffmpeg = common.ffmpeg_available()
     seen: dict[tuple[str, str, bool], dict[str, Any]] = {}
 
     for fmt in info.get("formats") or []:
@@ -168,6 +140,7 @@ def extract_info(url: str) -> dict[str, Any]:
     """解析视频链接，返回标题、封面、时长与可选清晰度列表。
 
     对应接口 GET /api/info。此步骤不下载文件 (download=False)。
+    平台路由由包门面 __init__.py 负责，本函数只处理走 yt-dlp 的通用情形。
     """
     opts = _base_opts()
     opts["skip_download"] = True
@@ -191,7 +164,7 @@ def extract_info(url: str) -> dict[str, Any]:
         "uploader": info.get("uploader") or info.get("channel"),
         "webpage_url": info.get("webpage_url") or url,
         "extractor": info.get("extractor_key") or info.get("extractor"),
-        "ffmpeg_available": ffmpeg_available(),
+        "ffmpeg_available": common.ffmpeg_available(),
         "formats": formats,
     }
 
@@ -211,7 +184,7 @@ def download(url: str, format_id: str | None = None) -> dict[str, Any]:
     # 清晰度选择策略：
     # - 指定 format_id：视频类自动附带最佳音频（有 ffmpeg 时合并）
     # - 未指定：有 ffmpeg 时优先最佳画质合并，否则回退到单文件最佳
-    has_ffmpeg = ffmpeg_available()
+    has_ffmpeg = common.ffmpeg_available()
     if format_id:
         if has_ffmpeg:
             fmt = f"{format_id}+bestaudio/{format_id}/best[ext=mp4]/best"
@@ -253,7 +226,7 @@ def download(url: str, format_id: str | None = None) -> dict[str, Any]:
     if not filepath.exists():
         raise ValueError("下载的文件不存在，可能被平台限制。")
 
-    safe_title = sanitize_filename(info.get("title") or "video")
+    safe_title = common.sanitize_filename(info.get("title") or "video")
     return {
         "filepath": str(filepath),
         "filename": f"{safe_title}{filepath.suffix}",

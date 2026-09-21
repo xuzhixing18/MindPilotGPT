@@ -9,7 +9,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from backend.main import app  # noqa: E402
-from backend import downloader  # noqa: E402
+from backend import downloader  # noqa: E402  门面：extract_info/download/ffmpeg_available
+from backend.downloader import generic  # noqa: E402  通用解析器：含清晰度整理内部函数
 
 print("import ok")
 print("routes:", [r.path for r in app.routes if hasattr(r, "path")])
@@ -24,10 +25,10 @@ fake_info = {
         {"format_id": "140", "ext": "m4a", "height": None, "vcodec": "none", "acodec": "mp4a", "abr": 128, "filesize": 4_000_000},
     ]
 }
-fmts = downloader._collect_formats(fake_info)
+fmts = generic._collect_formats(fake_info)
 print("collected formats:")
 for f in fmts:
     print("  ", f["label"], "| progressive=", f["progressive"], "| id=", f["format_id"])
-audio = downloader._collect_audio_option(fake_info)
+audio = generic._collect_audio_option(fake_info)
 print("audio option:", audio["label"] if audio else None)
 print("SMOKE TEST PASSED")
