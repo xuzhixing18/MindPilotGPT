@@ -32,12 +32,15 @@ _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from backend import ai, downloader, transcribe
+from backend import ai, downloader, storage, transcribe
 
 # 前端静态目录：项目根目录下的 frontend/
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
 
 app = FastAPI(title="MindPilot 视频下载", version="0.1.0")
+
+# 初始化存储层（建目录/建表，幂等）；失败不阻断启动，仅在 /api/health 反映
+_DB_READY = storage.init_db()
 
 # 允许跨域，便于前端分离部署或本地调试
 app.add_middleware(
@@ -66,6 +69,7 @@ def health() -> dict:
         "ai_provider": ai.current_label(),
         "asr": transcribe.asr_available(),
         "asr_provider": transcribe.asr_label(),
+        "db": _DB_READY,
     }
 
 
@@ -121,10 +125,13 @@ def _download_response(url: str, format_id: str | None) -> FileResponse:
 
 
 @app.post("/api/transcribe")
-def post_transcribe(url: str = Body(..., embed=True, min_length=1)) -> JSONResponse:
+def post_transcribe(
+    url: str = Body(..., embed=True, min_length=1),
+    refresh: bool = Body(False, embed=True),
+) -> JSONResponse:
     """提取视频字幕（转写）。同步 def → 由 Starlette 线程池执行，避免阻塞事件循环。"""
     try:
-        data = transcribe.transcribe(url)
+        data = transcribe.transcribe(url, refresh=refresh)
     except ValueError as exc:  # TranscribeError 继承自 ValueError
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
@@ -133,17 +140,20 @@ def post_transcribe(url: str = Body(..., embed=True, min_length=1)) -> JSONRespo
 
 
 @app.post("/api/summarize")
-def post_summarize(url: str = Body(..., embed=True, min_length=1)) -> JSONResponse:
+def post_summarize(
+    url: str = Body(..., embed=True, min_length=1),
+    refresh: bool = Body(False, embed=True),
+) -> JSONResponse:
     """一站式：提取字幕 → 调用大模型生成结构化总结（摘要/要点/章节）。"""
     try:
-        tr = transcribe.transcribe(url)
+        tr = transcribe.transcribe(url, refresh=refresh)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"转写出错：{exc}") from exc
 
     try:
-        summary = ai.summarize(tr["text"], tr.get("title", ""))
+        summary = ai.summarize(tr["text"], tr.get("title", ""), refresh=refresh)
     except ai.AINotConfiguredError as exc:
         # 未配置大模型：503 + 友好提示（前端据此引导配置，而非报“服务器错误”）
         raise HTTPException(status_code=503, detail=str(exc)) from exc
@@ -156,6 +166,7 @@ def post_summarize(url: str = Body(..., embed=True, min_length=1)) -> JSONRespon
         "title": tr.get("title"),
         "language": tr.get("language"),
         "source": tr.get("source"),
+        "cached": bool(summary.get("cached")),
         "summary": summary,
         "transcript": {
             "char_count": tr.get("char_count"),

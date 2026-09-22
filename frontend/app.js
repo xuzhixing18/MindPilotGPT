@@ -16,6 +16,11 @@
   let batchMode = false;
   let aiAvailable = false; // 由 /api/health 告知，用于 AI 总结按钮的可用性提示
 
+  // 会话级缓存与并发去重：同一 url 重复点击秒回、并发点击只发一次请求
+  const txCache = new Map();   // url -> 转写结果
+  const sumCache = new Map();  // url -> 总结响应
+  const inflight = new Map();  // `${type}:${url}` -> Promise
+
   /* ---------- 工具函数 ---------- */
   const fmtDuration = (sec) => {
     if (!sec && sec !== 0) return '';
@@ -152,9 +157,21 @@
     }
   };
 
-  const panelLoading = (panel, text) => {
+  const panelLoading = (panel, textOrStages) => {
+    const stages = Array.isArray(textOrStages) ? textOrStages : [textOrStages];
     panel.className = 'ai-panel mt-4 rounded-2xl border border-slate-200 bg-white p-5 text-sm text-slate-500';
-    panel.innerHTML = `<span class="inline-flex items-center gap-2"><span class="spinner"></span> ${text}</span>`;
+    const paint = (i, elapsed) => {
+      panel.innerHTML =
+        '<span class="inline-flex items-center gap-2"><span class="spinner"></span>' +
+        `<span class="stage">${escapeHtml(stages[i % stages.length])}</span>` +
+        `<span class="elapsed text-slate-400">${elapsed ? '（已用 ' + elapsed + 's）' : ''}</span></span>`;
+    };
+    paint(0, 0);
+    const t0 = Date.now();
+    let i = 0;
+    // 每 3s 轮换阶段文案并刷新已用秒数，缓解长等待焦虑
+    const id = setInterval(() => { i += 1; paint(i, Math.floor((Date.now() - t0) / 1000)); }, 3000);
+    return () => clearInterval(id);
   };
 
   const panelError = (panel, msg) => {
@@ -183,6 +200,7 @@
         <h4 class="inline-flex items-center gap-2 text-base font-bold text-slate-900">
           <svg viewBox="0 0 24 24" class="h-5 w-5 text-brand-500" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3l1.9 4.6L18.5 9.5l-4.6 1.9L12 16l-1.9-4.6L5.5 9.5l4.6-1.9L12 3z"/></svg>
           AI 总结
+          ${(data.cached || s.cached) ? '<span class="rounded-full bg-emerald-50 px-2 py-0.5 text-xs font-semibold text-emerald-600">秒开·已缓存</span>' : ''}
         </h4>
         ${s.model ? `<span class="text-xs text-slate-400">${escapeHtml(s.model)}</span>` : ''}
       </div>
@@ -206,22 +224,40 @@
     panel.className = 'ai-panel mt-4 fade-in rounded-2xl border border-slate-200 bg-white p-5';
     panel.innerHTML = `
       <div class="flex items-center justify-between gap-2">
-        <h4 class="text-base font-bold text-slate-900">字幕全文</h4>
+        <h4 class="inline-flex items-center gap-2 text-base font-bold text-slate-900">字幕全文${data.cached ? '<span class="rounded-full bg-emerald-50 px-2 py-0.5 text-xs font-semibold text-emerald-600">已缓存</span>' : ''}</h4>
         <span class="text-xs text-slate-400">${escapeHtml(data.language_name || data.language || '')} · ${segs.length} 段 · ${data.char_count || 0} 字</span>
       </div>
       <div class="mt-3 max-h-96 space-y-0.5 overflow-y-auto pr-2">${rows}</div>`;
   };
 
+  const postJson = async (path, body) => {
+    const res = await fetch(path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json().catch(() => ({}));
+    return { res, data };
+  };
+
+  // 客户端 single-flight：相同 key 的并发请求复用同一 Promise
+  const dedup = (key, factory) => {
+    if (inflight.has(key)) return inflight.get(key);
+    const p = factory().finally(() => inflight.delete(key));
+    inflight.set(key, p);
+    return p;
+  };
+
   const handleSummarize = async (url, panel, btn) => {
+    const hit = sumCache.get(url);
+    if (hit) { renderSummary(panel, { ...hit, cached: true }); return; }
     setLoading(btn, true);
-    panelLoading(panel, '正在提取字幕并生成 AI 总结，请稍候…（首次约需十几秒）');
+    const stop = panelLoading(panel, [
+      '正在提取字幕…', '字幕较长时正在下载音频并识别语音…',
+      '正在调用大模型生成结构化总结…', '快好了，正在整理要点与章节…',
+    ]);
     try {
-      const res = await fetch('/api/summarize', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url }),
-      });
-      const data = await res.json().catch(() => ({}));
+      const { res, data } = await dedup('sum:' + url, () => postJson('/api/summarize', { url }));
       if (!res.ok) {
         if (res.status === 503) {
           panelError(panel, `${data.detail || 'AI 未配置'}。请复制 .env.example 为 .env 并填入 API Key 后重启服务。`);
@@ -230,30 +266,31 @@
         }
         return;
       }
+      sumCache.set(url, data);
       renderSummary(panel, data);
     } catch (e) {
       panelError(panel, e.message || '网络错误，总结失败');
     } finally {
-      setLoading(btn, false);
+      stop(); setLoading(btn, false);
     }
   };
 
   const handleTranscribe = async (url, panel, btn) => {
+    const hit = txCache.get(url);
+    if (hit) { renderTranscript(panel, { ...hit, cached: true }); return; }
     setLoading(btn, true);
-    panelLoading(panel, '正在提取字幕…');
+    const stop = panelLoading(panel, [
+      '正在提取字幕…', '若该视频无字幕，正在下载音频并识别语音…', '快好了…',
+    ]);
     try {
-      const res = await fetch('/api/transcribe', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url }),
-      });
-      const data = await res.json().catch(() => ({}));
+      const { res, data } = await dedup('tx:' + url, () => postJson('/api/transcribe', { url }));
       if (!res.ok) { panelError(panel, data.detail || `转写失败 (HTTP ${res.status})`); return; }
+      txCache.set(url, data);
       renderTranscript(panel, data);
     } catch (e) {
       panelError(panel, e.message || '网络错误，转写失败');
     } finally {
-      setLoading(btn, false);
+      stop(); setLoading(btn, false);
     }
   };
 

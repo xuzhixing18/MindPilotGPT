@@ -15,9 +15,13 @@ from typing import Any
 
 from backend.ai import config as ai_config
 from backend.ai import llm
+from backend import storage  # 总结缓存 + 并发去重（阶段0：SQLite）
 
 # 单次喂给 LLM 的文本上限（主流模型上下文的安全区间，覆盖绝大多数视频）
 _MAX_CHARS = 30000
+
+# 提示词版本：修改 _SYSTEM_PROMPT / _build_prompt 后手动 bump，旧总结缓存自然失效
+PROMPT_VERSION = "v1"
 
 _SYSTEM_PROMPT = (
     "你是一位专业的视频内容分析助手，擅长把口语化、可能含识别错误的字幕，"
@@ -111,11 +115,15 @@ def _normalize(data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def summarize(text: str, title: str = "") -> dict[str, Any]:
-    """对字幕文本生成结构化总结。
+def summarize(text: str, title: str = "", *, refresh: bool = False) -> dict[str, Any]:
+    """对字幕文本生成结构化总结（带缓存）。
+
+    缓存键 = sha256(文本 + 模型 + PROMPT_VERSION)，跨 URL 复用；命中直接返回
+    （cached=True）。相同键的并发请求经 single-flight 只调用一次 LLM。
 
     :param text: 字幕全文
     :param title: 视频标题（辅助模型理解上下文）
+    :param refresh: 为 True 时跳过缓存、强制重算并覆盖
     :raises AINotConfiguredError: 未配置大模型
     :raises SummarizeError: 字幕为空、调用失败或解析失败
     """
@@ -128,18 +136,39 @@ def summarize(text: str, title: str = "") -> dict[str, Any]:
             "尚未配置大模型（缺少 AI_PROVIDER / API Key），无法生成 AI 总结。"
         )
 
-    truncated = len(text) > _MAX_CHARS
-    trimmed = text[:_MAX_CHARS]
-    messages = [
-        {"role": "system", "content": _SYSTEM_PROMPT},
-        {"role": "user", "content": _build_prompt(title, trimmed, truncated)},
-    ]
-    try:
-        raw = llm.chat(cfg, messages, temperature=0.3, max_tokens=2048)
-    except llm.LLMError as exc:
-        raise SummarizeError(str(exc)) from exc
+    model_label = f"{cfg.label} · {cfg.model}"
+    key = storage.summary_key(text, model_label, PROMPT_VERSION)
+    if not refresh:
+        hit = storage.repo.get_summary(key)
+        if hit is not None:
+            hit["cached"] = True
+            return hit
 
-    result = _normalize(_extract_json(raw))
-    result["model"] = f"{cfg.label} · {cfg.model}"
-    result["truncated"] = truncated
-    return result
+    def _do() -> dict[str, Any]:
+        # 双重检查：拿到 single-flight 锁后再查一次，避免并发重复调用 LLM
+        if not refresh:
+            hit = storage.repo.get_summary(key)
+            if hit is not None:
+                hit["cached"] = True
+                return hit
+        truncated = len(text) > _MAX_CHARS
+        trimmed = text[:_MAX_CHARS]
+        messages = [
+            {"role": "system", "content": _SYSTEM_PROMPT},
+            {"role": "user", "content": _build_prompt(title, trimmed, truncated)},
+        ]
+        try:
+            raw = llm.chat(cfg, messages, temperature=0.3, max_tokens=2048)
+        except llm.LLMError as exc:
+            raise SummarizeError(str(exc)) from exc
+
+        result = _normalize(_extract_json(raw))
+        result["model"] = model_label
+        result["truncated"] = truncated
+        result["cached"] = False
+        storage.repo.put_summary(
+            key, result, model=model_label, prompt_version=PROMPT_VERSION, title=title
+        )
+        return result
+
+    return storage.summary_flight.run(key, _do)

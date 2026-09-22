@@ -8,6 +8,12 @@ venv/
 test_download.*
 e2e_download.*
 
+# 阶段0 内容缓存数据库（SQLite 及其 WAL/SHM 附属文件，切勿提交）
+data/
+*.db
+*.db-wal
+*.db-shm
+
 # IDE
 .idea/
 .vscode/

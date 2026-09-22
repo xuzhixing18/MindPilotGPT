@@ -22,6 +22,7 @@ from urllib.parse import urlparse
 from backend.transcribe import subtitles, asr, audio
 from backend.transcribe.asr import ASRError, ASRNotConfiguredError
 from backend.transcribe.subtitles import TranscribeError
+from backend import storage  # 内容缓存 + 并发去重（阶段0：SQLite）
 
 __all__ = [
     "transcribe",
@@ -89,14 +90,8 @@ def _transcribe_via_asr(url: str) -> dict[str, Any]:
     }
 
 
-def transcribe(url: str) -> dict[str, Any]:
-    """把视频转写为带分段的文本：字幕优先，无字幕则 ASR 兜底。
-
-    :param url: 视频链接
-    :raises TranscribeError: 字幕与 ASR 均不可用 / 均失败
-    :return: {title, language, source, segments, text, char_count, ...}，
-             source ∈ {manual, auto, asr}
-    """
+def _compute_transcribe(url: str) -> dict[str, Any]:
+    """真正执行转写：字幕优先，无字幕则 ASR 兜底（不含缓存逻辑）。"""
     try:
         return subtitles.transcribe(url)  # 第一级：抓视频自带字幕
     except TranscribeError as sub_error:
@@ -109,3 +104,37 @@ def transcribe(url: str) -> dict[str, Any]:
             raise TranscribeError(
                 f"未找到字幕，且语音识别兜底失败：{asr_error}"
             ) from asr_error
+
+
+def transcribe(url: str, *, refresh: bool = False) -> dict[str, Any]:
+    """把视频转写为带分段的文本：缓存优先 → 字幕 → ASR 兜底。
+
+    命中缓存直接返回（``cached=True``）；未命中则计算并落库。相同 URL 的并发请求
+    经 single-flight 串行化，只计算一次（其余等待后命中缓存）。
+
+    :param url: 视频链接
+    :param refresh: 为 True 时跳过缓存、强制重算并覆盖
+    :raises TranscribeError: 字幕与 ASR 均不可用 / 均失败
+    :return: {title, language, source, segments, text, char_count, cached, ...}，
+             source ∈ {manual, auto, asr}
+    """
+    key = storage.transcript_key(url)
+    if not refresh:
+        hit = storage.repo.get_transcript(key)
+        if hit is not None:
+            hit["cached"] = True
+            return hit
+
+    def _do() -> dict[str, Any]:
+        # 双重检查：拿到 single-flight 锁后再查一次，避免并发重复计算
+        if not refresh:
+            hit = storage.repo.get_transcript(key)
+            if hit is not None:
+                hit["cached"] = True
+                return hit
+        result = _compute_transcribe(url)
+        result["cached"] = False
+        storage.repo.put_transcript(key, result, url, storage.normalize_url(url))
+        return result
+
+    return storage.transcribe_flight.run(key, _do)
