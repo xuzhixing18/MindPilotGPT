@@ -5,3 +5,7 @@ yt-dlp>=2026.8.19
 imageio-ffmpeg>=0.6.0
 # 抖音专用解析模块的 HTTP 客户端
 requests>=2.34.2
+# AI 总结：调用大模型（OpenAI 兼容端点）的 HTTP 客户端
+httpx>=0.27.0
+# 从 .env 读取 AI_PROVIDER / API Key 等配置（可选，未装则仅用系统环境变量）
+python-dotenv>=1.0.0

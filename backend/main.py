@@ -1,8 +1,10 @@
 """FastAPI 应用入口。
 
-提供两类接口：
-- GET  /api/info     解析视频链接，返回标题/封面/可选清晰度
-- POST /api/download 服务端下载并流式回传文件（手机/网页均可保存）
+提供的主要接口：
+- GET  /api/info       解析视频链接，返回标题/封面/可选清晰度
+- POST /api/download   服务端下载并流式回传文件（手机/网页均可保存）
+- POST /api/transcribe 提取视频字幕（转写为带时间戳文本）
+- POST /api/summarize  字幕 → 大模型结构化总结（摘要/要点/章节）
 
 同时托管项目根目录 frontend/ 下的单页前端。
 
@@ -30,7 +32,7 @@ _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from backend import downloader
+from backend import ai, downloader, transcribe
 
 # 前端静态目录：项目根目录下的 frontend/
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
@@ -56,8 +58,15 @@ def _cleanup(path_str: str) -> None:
 
 @app.get("/api/health")
 def health() -> dict:
-    """健康检查，同时告知前端 ffmpeg 是否可用（影响高清合并）。"""
-    return {"status": "ok", "ffmpeg": downloader.ffmpeg_available()}
+    """健康检查：告知前端 ffmpeg（影响高清合并）、AI 总结与 ASR 兜底是否可用。"""
+    return {
+        "status": "ok",
+        "ffmpeg": downloader.ffmpeg_available(),
+        "ai": ai.ai_available(),
+        "ai_provider": ai.current_label(),
+        "asr": transcribe.asr_available(),
+        "asr_provider": transcribe.asr_label(),
+    }
 
 
 @app.get("/api/info")
@@ -109,6 +118,50 @@ def _download_response(url: str, format_id: str | None) -> FileResponse:
         media_type="application/octet-stream",
         background=BackgroundTask(_cleanup, result["filepath"]),
     )
+
+
+@app.post("/api/transcribe")
+def post_transcribe(url: str = Body(..., embed=True, min_length=1)) -> JSONResponse:
+    """提取视频字幕（转写）。同步 def → 由 Starlette 线程池执行，避免阻塞事件循环。"""
+    try:
+        data = transcribe.transcribe(url)
+    except ValueError as exc:  # TranscribeError 继承自 ValueError
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"转写出错：{exc}") from exc
+    return JSONResponse(data)
+
+
+@app.post("/api/summarize")
+def post_summarize(url: str = Body(..., embed=True, min_length=1)) -> JSONResponse:
+    """一站式：提取字幕 → 调用大模型生成结构化总结（摘要/要点/章节）。"""
+    try:
+        tr = transcribe.transcribe(url)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"转写出错：{exc}") from exc
+
+    try:
+        summary = ai.summarize(tr["text"], tr.get("title", ""))
+    except ai.AINotConfiguredError as exc:
+        # 未配置大模型：503 + 友好提示（前端据此引导配置，而非报“服务器错误”）
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except ai.SummarizeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"总结出错：{exc}") from exc
+
+    return JSONResponse({
+        "title": tr.get("title"),
+        "language": tr.get("language"),
+        "source": tr.get("source"),
+        "summary": summary,
+        "transcript": {
+            "char_count": tr.get("char_count"),
+            "segment_count": len(tr.get("segments") or []),
+        },
+    })
 
 
 # 静态前端（放在最后，避免覆盖 /api 路由）

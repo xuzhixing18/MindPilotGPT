@@ -11,3 +11,8 @@ e2e_download.*
 # IDE
 .idea/
 .vscode/
+
+# 环境变量与密钥（切勿提交）
+.env
+.env.local
+.env.*.local

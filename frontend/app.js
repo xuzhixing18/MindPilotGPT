@@ -14,6 +14,7 @@
   const ffmpegTip = $('#ffmpeg-tip');
 
   let batchMode = false;
+  let aiAvailable = false; // 由 /api/health 告知，用于 AI 总结按钮的可用性提示
 
   /* ---------- 工具函数 ---------- */
   const fmtDuration = (sec) => {
@@ -28,6 +29,15 @@
     const mb = bytes / 1024 / 1024;
     if (mb >= 1024) return `${(mb / 1024).toFixed(2)} GB`;
     return `${mb.toFixed(1)} MB`;
+  };
+
+  // 字幕时间戳：支持超过 1 小时（HH:MM:SS）
+  const fmtTs = (sec) => {
+    if (!sec && sec !== 0) return '';
+    const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = Math.floor(sec % 60);
+    const mm = h > 0 ? String(m).padStart(2, '0') : m;
+    const ss = String(s).padStart(2, '0');
+    return h > 0 ? `${h}:${mm}:${ss}` : `${mm}:${ss}`;
   };
 
   const escapeHtml = (str = '') =>
@@ -46,11 +56,12 @@
     a.remove();
   };
 
-  /* ---------- 健康检查 / ffmpeg 提示 ---------- */
+  /* ---------- 健康检查 / ffmpeg + AI 状态提示 ---------- */
   const checkHealth = async () => {
     try {
       const res = await fetch('/api/health');
       const data = await res.json();
+      aiAvailable = !!data.ai;
       if (!data.ffmpeg) {
         ffmpegTip.classList.remove('hidden');
         ffmpegTip.classList.add('inline-flex');
@@ -109,10 +120,141 @@
                 下载
               </button>
             </div>
+            <div class="mt-3 flex flex-wrap items-center gap-2">
+              <button class="ai-btn inline-flex items-center gap-1.5 rounded-xl border border-brand-200 bg-brand-50 px-4 py-2 text-sm font-semibold text-brand-600 transition hover:bg-brand-100 active:scale-95">
+                <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3l1.9 4.6L18.5 9.5l-4.6 1.9L12 16l-1.9-4.6L5.5 9.5l4.6-1.9L12 3z"/><path d="M18.5 14.5l.7 1.8 1.8.7-1.8.7-.7 1.8-.7-1.8-1.8-.7 1.8-.7.7-1.8z"/></svg>
+                AI 总结
+              </button>
+              <button class="sub-btn inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-600 transition hover:border-brand-300 hover:text-brand-600 active:scale-95">
+                <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 15h4M13 15h4M7 11h10"/></svg>
+                查看字幕
+              </button>
+            </div>
           </div>
         </div>
         <div class="dl-status mt-3 hidden text-sm"></div>
+        <div class="ai-panel mt-4 hidden"></div>
       </div>`;
+  };
+
+  /* ---------- AI 总结 / 字幕：面板与渲染 ---------- */
+  const setLoading = (btn, loading) => {
+    if (!btn) return;
+    if (loading) {
+      btn.dataset.html = btn.innerHTML;
+      btn.disabled = true;
+      btn.classList.add('opacity-60');
+      btn.innerHTML = '<span class="inline-flex items-center gap-2"><span class="spinner"></span> 处理中…</span>';
+    } else {
+      btn.disabled = false;
+      btn.classList.remove('opacity-60');
+      if (btn.dataset.html) btn.innerHTML = btn.dataset.html;
+    }
+  };
+
+  const panelLoading = (panel, text) => {
+    panel.className = 'ai-panel mt-4 rounded-2xl border border-slate-200 bg-white p-5 text-sm text-slate-500';
+    panel.innerHTML = `<span class="inline-flex items-center gap-2"><span class="spinner"></span> ${text}</span>`;
+  };
+
+  const panelError = (panel, msg) => {
+    panel.className = 'ai-panel mt-4 rounded-2xl border border-rose-200 bg-rose-50 p-4 text-sm leading-relaxed text-rose-600';
+    panel.innerHTML = escapeHtml(msg);
+  };
+
+  const renderSummary = (panel, data) => {
+    const s = data.summary || {};
+    const points = (s.key_points || [])
+      .map((p) => `<li class="flex gap-2"><span class="text-brand-500">•</span><span>${escapeHtml(p)}</span></li>`)
+      .join('');
+    const chapters = (s.chapters || [])
+      .map((c, i) => `
+        <div class="rounded-xl border border-slate-200 bg-white p-3">
+          <div class="text-sm font-semibold text-slate-800">${i + 1}. ${escapeHtml(c.title || '')}</div>
+          ${c.summary ? `<div class="mt-1 text-xs leading-relaxed text-slate-500">${escapeHtml(c.summary)}</div>` : ''}
+        </div>`)
+      .join('');
+    const keywords = (s.keywords || [])
+      .map((k) => `<span class="rounded-full bg-brand-50 px-2.5 py-1 text-xs text-brand-600">${escapeHtml(k)}</span>`)
+      .join('');
+    panel.className = 'ai-panel mt-4 fade-in rounded-2xl border border-brand-100 bg-gradient-to-b from-brand-50/60 to-white p-5';
+    panel.innerHTML = `
+      <div class="flex items-center justify-between gap-2">
+        <h4 class="inline-flex items-center gap-2 text-base font-bold text-slate-900">
+          <svg viewBox="0 0 24 24" class="h-5 w-5 text-brand-500" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3l1.9 4.6L18.5 9.5l-4.6 1.9L12 16l-1.9-4.6L5.5 9.5l4.6-1.9L12 3z"/></svg>
+          AI 总结
+        </h4>
+        ${s.model ? `<span class="text-xs text-slate-400">${escapeHtml(s.model)}</span>` : ''}
+      </div>
+      ${s.one_line ? `<p class="mt-3 text-sm font-semibold text-brand-700">${escapeHtml(s.one_line)}</p>` : ''}
+      ${s.summary ? `<p class="mt-2 text-sm leading-relaxed text-slate-600">${escapeHtml(s.summary)}</p>` : ''}
+      ${points ? `<div class="mt-4"><div class="text-xs font-semibold text-slate-500">关键要点</div><ul class="mt-2 space-y-1.5 text-sm text-slate-600">${points}</ul></div>` : ''}
+      ${chapters ? `<div class="mt-4"><div class="text-xs font-semibold text-slate-500">章节速览</div><div class="mt-2 grid gap-2 sm:grid-cols-2">${chapters}</div></div>` : ''}
+      ${keywords ? `<div class="mt-4 flex flex-wrap gap-2">${keywords}</div>` : ''}
+      ${s.truncated ? `<p class="mt-3 text-xs text-amber-600">注：字幕较长，总结基于前半部分内容。</p>` : ''}`;
+  };
+
+  const renderTranscript = (panel, data) => {
+    const segs = data.segments || [];
+    const rows = segs
+      .map((seg) => `
+        <div class="flex gap-3 border-b border-slate-100 py-1.5 last:border-0">
+          <span class="shrink-0 font-mono text-xs text-brand-500">${fmtTs(seg.start)}</span>
+          <span class="text-sm leading-relaxed text-slate-600">${escapeHtml(seg.text)}</span>
+        </div>`)
+      .join('');
+    panel.className = 'ai-panel mt-4 fade-in rounded-2xl border border-slate-200 bg-white p-5';
+    panel.innerHTML = `
+      <div class="flex items-center justify-between gap-2">
+        <h4 class="text-base font-bold text-slate-900">字幕全文</h4>
+        <span class="text-xs text-slate-400">${escapeHtml(data.language_name || data.language || '')} · ${segs.length} 段 · ${data.char_count || 0} 字</span>
+      </div>
+      <div class="mt-3 max-h-96 space-y-0.5 overflow-y-auto pr-2">${rows}</div>`;
+  };
+
+  const handleSummarize = async (url, panel, btn) => {
+    setLoading(btn, true);
+    panelLoading(panel, '正在提取字幕并生成 AI 总结，请稍候…（首次约需十几秒）');
+    try {
+      const res = await fetch('/api/summarize', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        if (res.status === 503) {
+          panelError(panel, `${data.detail || 'AI 未配置'}。请复制 .env.example 为 .env 并填入 API Key 后重启服务。`);
+        } else {
+          panelError(panel, data.detail || `总结失败 (HTTP ${res.status})`);
+        }
+        return;
+      }
+      renderSummary(panel, data);
+    } catch (e) {
+      panelError(panel, e.message || '网络错误，总结失败');
+    } finally {
+      setLoading(btn, false);
+    }
+  };
+
+  const handleTranscribe = async (url, panel, btn) => {
+    setLoading(btn, true);
+    panelLoading(panel, '正在提取字幕…');
+    try {
+      const res = await fetch('/api/transcribe', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) { panelError(panel, data.detail || `转写失败 (HTTP ${res.status})`); return; }
+      renderTranscript(panel, data);
+    } catch (e) {
+      panelError(panel, e.message || '网络错误，转写失败');
+    } finally {
+      setLoading(btn, false);
+    }
   };
 
   /* ---------- 绑定卡片事件 ---------- */
@@ -120,6 +262,7 @@
     const dlBtn = cardEl.querySelector('.dl-btn');
     const select = cardEl.querySelector('.format-select');
     const status = cardEl.querySelector('.dl-status');
+    const panel = cardEl.querySelector('.ai-panel');
     dlBtn.addEventListener('click', () => {
       const formatId = select ? select.value : null;
       status.className = 'dl-status mt-3 text-sm text-brand-600';
@@ -131,6 +274,14 @@
         status.textContent = '已发起下载，请查看浏览器下载列表。若未开始，请重试或更换清晰度。';
       }, 2500);
     });
+
+    const aiBtn = cardEl.querySelector('.ai-btn');
+    if (aiBtn) {
+      if (!aiAvailable) aiBtn.title = '未检测到大模型配置，点击可查看如何启用';
+      aiBtn.addEventListener('click', () => handleSummarize(url, panel, aiBtn));
+    }
+    const subBtn = cardEl.querySelector('.sub-btn');
+    if (subBtn) subBtn.addEventListener('click', () => handleTranscribe(url, panel, subBtn));
   };
 
   /* ---------- 单条解析流程 ---------- */
