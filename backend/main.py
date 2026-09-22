@@ -5,6 +5,8 @@
 - POST /api/download   服务端下载并流式回传文件（手机/网页均可保存）
 - POST /api/transcribe 提取视频字幕（转写为带时间戳文本）
 - POST /api/summarize  字幕 → 大模型结构化总结（摘要/要点/章节）
+- POST /api/mindmap    字幕 → 大模型层级思维导图
+- POST /api/qa         字幕 → 基于内容的多轮问答
 
 同时托管项目根目录 frontend/ 下的单页前端。
 
@@ -173,6 +175,62 @@ def post_summarize(
             "segment_count": len(tr.get("segments") or []),
         },
     })
+
+
+@app.post("/api/mindmap")
+def post_mindmap(
+    url: str = Body(..., embed=True, min_length=1),
+    refresh: bool = Body(False, embed=True),
+) -> JSONResponse:
+    """一站式：提取字幕 → 调用大模型生成层级思维导图（带缓存）。"""
+    try:
+        tr = transcribe.transcribe(url, refresh=refresh)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"转写出错：{exc}") from exc
+
+    try:
+        mindmap = ai.build_mindmap(tr["text"], tr.get("title", ""), refresh=refresh)
+    except ai.AINotConfiguredError as exc:
+        # 未配置大模型：503 + 友好提示（前端据此引导配置，而非报“服务器错误”）
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except ai.MindmapError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"思维导图出错：{exc}") from exc
+
+    return JSONResponse({
+        "title": tr.get("title"),
+        "cached": bool(mindmap.get("cached")),
+        "mindmap": mindmap,
+    })
+
+
+@app.post("/api/qa")
+def post_qa(
+    url: str = Body(..., embed=True, min_length=1),
+    question: str = Body(..., embed=True, min_length=1),
+    history: list[dict] | None = Body(None, embed=True),
+) -> JSONResponse:
+    """一站式：提取字幕 → 基于字幕内容回答一个问题（支持多轮上下文）。"""
+    try:
+        tr = transcribe.transcribe(url)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"转写出错：{exc}") from exc
+
+    try:
+        result = ai.ask(tr["text"], tr.get("title", ""), question, history=history)
+    except ai.AINotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except ai.QAError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"问答出错：{exc}") from exc
+
+    return JSONResponse(result)
 
 
 # 静态前端（放在最后，避免覆盖 /api 路由）

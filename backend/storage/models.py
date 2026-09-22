@@ -51,3 +51,19 @@ class Summary(Base):
     title: Mapped[str] = mapped_column(Text, default="")
     summary: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class Mindmap(Base):
+    """AI 思维导图缓存（按 文本哈希 + 模型 + 提示词版本 为主键，跨 URL 复用）。
+
+    与 Summary 同构：不设 TTL，键含模型与提示词版本，任一变更即自然失效。
+    """
+
+    __tablename__ = "mindmaps"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    model: Mapped[str] = mapped_column(String(128), default="")
+    prompt_version: Mapped[str] = mapped_column(String(16), default="")
+    title: Mapped[str] = mapped_column(Text, default="")
+    mindmap: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)

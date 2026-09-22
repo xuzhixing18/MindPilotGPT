@@ -64,3 +64,9 @@ def summary_key(text: str, model: str, prompt_version: str) -> str:
     """总结缓存键：文本 + 模型 + 提示词版本 的 sha256（任一变化即自然失效）。"""
     raw = f"{text or ''}\x1f{model or ''}\x1f{prompt_version or ''}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def mindmap_key(text: str, model: str, prompt_version: str) -> str:
+    """思维导图缓存键：与 summary_key 同理，加域前缀避免与总结键空间混淆。"""
+    raw = f"mindmap\x1f{text or ''}\x1f{model or ''}\x1f{prompt_version or ''}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()

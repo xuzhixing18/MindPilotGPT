@@ -17,9 +17,26 @@
   let aiAvailable = false; // 由 /api/health 告知，用于 AI 总结按钮的可用性提示
 
   // 会话级缓存与并发去重：同一 url 重复点击秒回、并发点击只发一次请求
-  const txCache = new Map();   // url -> 转写结果
-  const sumCache = new Map();  // url -> 总结响应
-  const inflight = new Map();  // `${type}:${url}` -> Promise
+  const txCache = new Map();       // url -> 转写结果
+  const sumCache = new Map();      // url -> 总结响应
+  const mindmapCache = new Map();  // url -> 思维导图响应
+  const qaCache = new Map();       // url -> { messages: [{role, content}] } 问答会话（多轮，切 Tab 保留）
+  const inflight = new Map();      // `${type}:${url}` -> Promise
+
+  // AI 输出区四 Tab（总结/字幕/思维导图/问答）的样式、图标与文案
+  const AI_CONFIG_HINT = '请复制 .env.example 为 .env 并填入 API Key 后重启服务。';
+  const TAB_ACTIVE = 'ai-tab inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-xl border border-slate-200 bg-white px-3.5 py-2 text-sm font-semibold text-brand-600 shadow-sm';
+  const TAB_IDLE = 'ai-tab inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-xl border border-transparent px-3.5 py-2 text-sm font-semibold text-slate-500 transition hover:text-slate-800';
+  const TAB_ORDER = ['summary', 'transcript', 'mindmap', 'qa'];
+  const TAB_LABELS = { summary: '总结摘要', transcript: '字幕文本', mindmap: '思维导图', qa: 'AI 问答' };
+  const TAB_ICONS = {
+    summary: '<svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3l1.9 4.6L18.5 9.5l-4.6 1.9L12 16l-1.9-4.6L5.5 9.5l4.6-1.9L12 3z"/></svg>',
+    transcript: '<svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 15h4M13 15h4M7 11h10"/></svg>',
+    mindmap: '<svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="5" r="2"/><circle cx="5" cy="18" r="2"/><circle cx="19" cy="18" r="2"/><path d="M12 7v4M12 11l-6 5M12 11l6 5"/></svg>',
+    qa: '<svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>',
+  };
+  const tabButton = (tab, active) =>
+    `<button type="button" role="tab" data-tab="${tab}" aria-selected="${active ? 'true' : 'false'}" class="${active ? TAB_ACTIVE : TAB_IDLE}">${TAB_ICONS[tab]}<span>${TAB_LABELS[tab]}</span></button>`;
 
   /* ---------- 工具函数 ---------- */
   const fmtDuration = (sec) => {
@@ -138,33 +155,25 @@
           </div>
         </div>
         <div class="dl-status mt-3 hidden text-sm"></div>
-        <div class="ai-panel mt-4 hidden"></div>
+        <div class="ai-panel mt-4 hidden">
+          <div class="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+            <div role="tablist" aria-label="AI 分析" class="flex gap-1 overflow-x-auto border-b border-slate-200 bg-slate-50/70 p-2">
+              ${TAB_ORDER.map((t) => tabButton(t, t === 'summary')).join('')}
+            </div>
+            ${TAB_ORDER.map((t) => `<div role="tabpanel" data-panel="${t}" class="ai-tabpanel${t === 'summary' ? '' : ' hidden'} p-4 sm:p-5"></div>`).join('')}
+          </div>
+        </div>
       </div>`;
   };
 
-  /* ---------- AI 总结 / 字幕：面板与渲染 ---------- */
-  const setLoading = (btn, loading) => {
-    if (!btn) return;
-    if (loading) {
-      btn.dataset.html = btn.innerHTML;
-      btn.disabled = true;
-      btn.classList.add('opacity-60');
-      btn.innerHTML = '<span class="inline-flex items-center gap-2"><span class="spinner"></span> 处理中…</span>';
-    } else {
-      btn.disabled = false;
-      btn.classList.remove('opacity-60');
-      if (btn.dataset.html) btn.innerHTML = btn.dataset.html;
-    }
-  };
-
+  /* ---------- AI 面板：加载 / 错误（写入 tabpanel，不再整体替换其 className） ---------- */
   const panelLoading = (panel, textOrStages) => {
     const stages = Array.isArray(textOrStages) ? textOrStages : [textOrStages];
-    panel.className = 'ai-panel mt-4 rounded-2xl border border-slate-200 bg-white p-5 text-sm text-slate-500';
     const paint = (i, elapsed) => {
       panel.innerHTML =
-        '<span class="inline-flex items-center gap-2"><span class="spinner"></span>' +
+        '<div class="flex items-center gap-2 text-sm text-slate-500"><span class="spinner"></span>' +
         `<span class="stage">${escapeHtml(stages[i % stages.length])}</span>` +
-        `<span class="elapsed text-slate-400">${elapsed ? '（已用 ' + elapsed + 's）' : ''}</span></span>`;
+        `<span class="elapsed text-slate-400">${elapsed ? '（已用 ' + elapsed + 's）' : ''}</span></div>`;
     };
     paint(0, 0);
     const t0 = Date.now();
@@ -175,8 +184,7 @@
   };
 
   const panelError = (panel, msg) => {
-    panel.className = 'ai-panel mt-4 rounded-2xl border border-rose-200 bg-rose-50 p-4 text-sm leading-relaxed text-rose-600';
-    panel.innerHTML = escapeHtml(msg);
+    panel.innerHTML = `<div class="rounded-xl border border-rose-200 bg-rose-50 p-4 text-sm leading-relaxed text-rose-600">${escapeHtml(msg)}</div>`;
   };
 
   const renderSummary = (panel, data) => {
@@ -194,8 +202,8 @@
     const keywords = (s.keywords || [])
       .map((k) => `<span class="rounded-full bg-brand-50 px-2.5 py-1 text-xs text-brand-600">${escapeHtml(k)}</span>`)
       .join('');
-    panel.className = 'ai-panel mt-4 fade-in rounded-2xl border border-brand-100 bg-gradient-to-b from-brand-50/60 to-white p-5';
     panel.innerHTML = `
+      <div class="fade-in">
       <div class="flex items-center justify-between gap-2">
         <h4 class="inline-flex items-center gap-2 text-base font-bold text-slate-900">
           <svg viewBox="0 0 24 24" class="h-5 w-5 text-brand-500" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3l1.9 4.6L18.5 9.5l-4.6 1.9L12 16l-1.9-4.6L5.5 9.5l4.6-1.9L12 3z"/></svg>
@@ -209,7 +217,8 @@
       ${points ? `<div class="mt-4"><div class="text-xs font-semibold text-slate-500">关键要点</div><ul class="mt-2 space-y-1.5 text-sm text-slate-600">${points}</ul></div>` : ''}
       ${chapters ? `<div class="mt-4"><div class="text-xs font-semibold text-slate-500">章节速览</div><div class="mt-2 grid gap-2 sm:grid-cols-2">${chapters}</div></div>` : ''}
       ${keywords ? `<div class="mt-4 flex flex-wrap gap-2">${keywords}</div>` : ''}
-      ${s.truncated ? `<p class="mt-3 text-xs text-amber-600">注：字幕较长，总结基于前半部分内容。</p>` : ''}`;
+      ${s.truncated ? `<p class="mt-3 text-xs text-amber-600">注：字幕较长，总结基于前半部分内容。</p>` : ''}
+      </div>`;
   };
 
   const renderTranscript = (panel, data) => {
@@ -221,13 +230,143 @@
           <span class="text-sm leading-relaxed text-slate-600">${escapeHtml(seg.text)}</span>
         </div>`)
       .join('');
-    panel.className = 'ai-panel mt-4 fade-in rounded-2xl border border-slate-200 bg-white p-5';
     panel.innerHTML = `
+      <div class="fade-in">
       <div class="flex items-center justify-between gap-2">
         <h4 class="inline-flex items-center gap-2 text-base font-bold text-slate-900">字幕全文${data.cached ? '<span class="rounded-full bg-emerald-50 px-2 py-0.5 text-xs font-semibold text-emerald-600">已缓存</span>' : ''}</h4>
         <span class="text-xs text-slate-400">${escapeHtml(data.language_name || data.language || '')} · ${segs.length} 段 · ${data.char_count || 0} 字</span>
       </div>
-      <div class="mt-3 max-h-96 space-y-0.5 overflow-y-auto pr-2">${rows}</div>`;
+      <div class="mt-3 max-h-96 space-y-0.5 overflow-y-auto pr-2">${rows}</div>
+      </div>`;
+  };
+
+  /* ---------- 思维导图渲染（无第三方库，CSS 缩进树，递归） ---------- */
+  const mmNode = (n) => {
+    const kids = n.children || [];
+    const kidsHtml = kids.length
+      ? `<div class="mt-1.5 space-y-1.5 border-l border-slate-200 pl-3 sm:pl-4">${kids.map(mmNode).join('')}</div>`
+      : '';
+    return `<div class="mt-1.5">
+        <span class="inline-block rounded-lg bg-slate-100 px-2.5 py-1 text-sm leading-snug text-slate-700">${escapeHtml(n.title || '')}</span>
+        ${kidsHtml}
+      </div>`;
+  };
+
+  const renderMindmap = (panel, data) => {
+    const mm = data.mindmap || {};
+    const kids = mm.children || [];
+    panel.innerHTML = `
+      <div class="fade-in">
+      <div class="flex items-center justify-between gap-2">
+        <h4 class="inline-flex items-center gap-2 text-base font-bold text-slate-900">
+          <span class="text-brand-500">${TAB_ICONS.mindmap}</span>
+          思维导图
+          ${(data.cached || mm.cached) ? '<span class="rounded-full bg-emerald-50 px-2 py-0.5 text-xs font-semibold text-emerald-600">已缓存</span>' : ''}
+        </h4>
+        ${mm.model ? `<span class="text-xs text-slate-400">${escapeHtml(mm.model)}</span>` : ''}
+      </div>
+      <div class="mt-4">
+        <div class="inline-block rounded-xl bg-brand-500 px-4 py-2 text-sm font-bold text-white shadow-glow">${escapeHtml(mm.title || '思维导图')}</div>
+        ${kids.length
+          ? `<div class="mt-3 border-l-2 border-brand-100 pl-3 sm:pl-4">${kids.map(mmNode).join('')}</div>`
+          : '<p class="mt-3 text-sm text-slate-400">（该视频暂无更多可展开的分支）</p>'}
+      </div>
+      ${mm.truncated ? '<p class="mt-3 text-xs text-amber-600">注：字幕较长，思维导图基于前半部分内容。</p>' : ''}
+      </div>`;
+  };
+
+  /* ---------- AI 问答渲染（多轮聊天，会话状态存于 qaCache，切 Tab 保留） ---------- */
+  const QA_SUGGESTIONS = ['这个视频主要讲了什么？', '核心结论或要点是什么？', '有哪些关键数据、案例或方法？', '适合什么人群观看？'];
+
+  const qaBubble = (m) => {
+    if (m.role === 'user') {
+      return `<div class="flex justify-end"><div class="max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-br-sm bg-brand-500 px-3.5 py-2 text-sm text-white">${escapeHtml(m.content)}</div></div>`;
+    }
+    const cls = m.error ? 'border-rose-200 bg-rose-50 text-rose-600' : 'border-slate-200 bg-white text-slate-700';
+    return `<div class="flex justify-start"><div class="max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-bl-sm border ${cls} px-3.5 py-2 text-sm leading-relaxed">${escapeHtml(m.content)}</div></div>`;
+  };
+
+  const renderQA = (panel, url) => {
+    let conv = qaCache.get(url);
+    if (!conv) { conv = { messages: [] }; qaCache.set(url, conv); }
+
+    panel.innerHTML = `
+      <div class="fade-in flex flex-col">
+        <div class="flex items-center justify-between gap-2">
+          <h4 class="inline-flex items-center gap-2 text-base font-bold text-slate-900">
+            <span class="text-brand-500">${TAB_ICONS.qa}</span> AI 问答
+          </h4>
+          <span class="text-xs text-slate-400">仅依据该视频字幕作答</span>
+        </div>
+        <div class="qa-log mt-3 max-h-[26rem] space-y-3 overflow-y-auto pr-1"></div>
+        <div class="qa-suggest mt-3 flex flex-wrap gap-2"></div>
+        <div class="mt-3 flex gap-2">
+          <input type="text" class="qa-input flex-1 rounded-xl border border-slate-200 px-3.5 py-2.5 text-sm outline-none focus:border-brand-400" placeholder="就这个视频提问，如：作者的核心观点是什么？" />
+          <button type="button" class="qa-send shrink-0 rounded-xl bg-brand-500 px-5 py-2.5 text-sm font-bold text-white shadow-glow transition hover:bg-brand-600 active:scale-95">发送</button>
+        </div>
+      </div>`;
+
+    const logEl = panel.querySelector('.qa-log');
+    const suggestEl = panel.querySelector('.qa-suggest');
+    const inputEl = panel.querySelector('.qa-input');
+    const sendBtn = panel.querySelector('.qa-send');
+
+    const paintLog = () => {
+      if (!conv.messages.length) {
+        logEl.innerHTML = '<div class="rounded-2xl border border-dashed border-slate-200 bg-slate-50 p-4 text-center text-sm text-slate-400">还没有提问。基于该视频字幕，问问任何你想知道的 👇</div>';
+        return;
+      }
+      logEl.innerHTML = conv.messages.map(qaBubble).join('');
+      logEl.scrollTop = logEl.scrollHeight;
+    };
+
+    const send = async (preset) => {
+      const question = String(preset != null ? preset : inputEl.value).trim();
+      if (!question) { inputEl.focus(); return; }
+      inputEl.value = '';
+      suggestEl.innerHTML = '';
+      const history = conv.messages.slice(-8);   // 仅携带本轮之前的对话作为上下文
+      conv.messages.push({ role: 'user', content: question });
+      paintLog();
+      const thinking = document.createElement('div');
+      thinking.className = 'flex justify-start';
+      thinking.innerHTML = '<div class="inline-flex items-center gap-2 rounded-2xl rounded-bl-sm border border-slate-200 bg-white px-3.5 py-2 text-sm text-slate-400"><span class="spinner"></span> 思考中…</div>';
+      logEl.appendChild(thinking);
+      logEl.scrollTop = logEl.scrollHeight;
+      sendBtn.disabled = true; sendBtn.classList.add('opacity-60');
+      try {
+        const { res, data } = await postJson('/api/qa', { url, question, history });
+        if (!res.ok) {
+          const msg = res.status === 503
+            ? `${data.detail || 'AI 未配置'}。${AI_CONFIG_HINT}`
+            : (data.detail || `问答失败 (HTTP ${res.status})`);
+          conv.messages.push({ role: 'assistant', content: msg, error: true });
+        } else {
+          conv.messages.push({ role: 'assistant', content: data.answer });
+        }
+      } catch (e) {
+        conv.messages.push({ role: 'assistant', content: e.message || '网络错误，问答失败', error: true });
+      } finally {
+        thinking.remove();
+        sendBtn.disabled = false; sendBtn.classList.remove('opacity-60');
+        paintLog();
+        inputEl.focus();
+      }
+    };
+
+    const paintSuggest = () => {
+      if (conv.messages.length) { suggestEl.innerHTML = ''; return; }
+      suggestEl.innerHTML = QA_SUGGESTIONS
+        .map((q) => `<button type="button" class="qa-chip rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs text-slate-600 transition hover:border-brand-300 hover:text-brand-600">${escapeHtml(q)}</button>`)
+        .join('');
+      suggestEl.querySelectorAll('.qa-chip').forEach((chip) =>
+        chip.addEventListener('click', () => send(chip.textContent)));
+    };
+
+    sendBtn.addEventListener('click', () => send());
+    inputEl.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.isComposing) send(); });
+    paintLog();
+    paintSuggest();
   };
 
   const postJson = async (path, body) => {
@@ -248,10 +387,10 @@
     return p;
   };
 
-  const handleSummarize = async (url, panel, btn) => {
+  /* ---------- 各 Tab 懒加载器：命中会话缓存即渲染，否则请求并写入（返回是否成功） ---------- */
+  const loadSummary = async (url, panel) => {
     const hit = sumCache.get(url);
-    if (hit) { renderSummary(panel, { ...hit, cached: true }); return; }
-    setLoading(btn, true);
+    if (hit) { renderSummary(panel, { ...hit, cached: true }); return true; }
     const stop = panelLoading(panel, [
       '正在提取字幕…', '字幕较长时正在下载音频并识别语音…',
       '正在调用大模型生成结构化总结…', '快好了，正在整理要点与章节…',
@@ -259,39 +398,93 @@
     try {
       const { res, data } = await dedup('sum:' + url, () => postJson('/api/summarize', { url }));
       if (!res.ok) {
-        if (res.status === 503) {
-          panelError(panel, `${data.detail || 'AI 未配置'}。请复制 .env.example 为 .env 并填入 API Key 后重启服务。`);
-        } else {
-          panelError(panel, data.detail || `总结失败 (HTTP ${res.status})`);
-        }
-        return;
+        panelError(panel, res.status === 503
+          ? `${data.detail || 'AI 未配置'}。${AI_CONFIG_HINT}`
+          : (data.detail || `总结失败 (HTTP ${res.status})`));
+        return false;
       }
       sumCache.set(url, data);
       renderSummary(panel, data);
+      return true;
     } catch (e) {
       panelError(panel, e.message || '网络错误，总结失败');
-    } finally {
-      stop(); setLoading(btn, false);
-    }
+      return false;
+    } finally { stop(); }
   };
 
-  const handleTranscribe = async (url, panel, btn) => {
+  const loadTranscript = async (url, panel) => {
     const hit = txCache.get(url);
-    if (hit) { renderTranscript(panel, { ...hit, cached: true }); return; }
-    setLoading(btn, true);
+    if (hit) { renderTranscript(panel, { ...hit, cached: true }); return true; }
     const stop = panelLoading(panel, [
       '正在提取字幕…', '若该视频无字幕，正在下载音频并识别语音…', '快好了…',
     ]);
     try {
       const { res, data } = await dedup('tx:' + url, () => postJson('/api/transcribe', { url }));
-      if (!res.ok) { panelError(panel, data.detail || `转写失败 (HTTP ${res.status})`); return; }
+      if (!res.ok) { panelError(panel, data.detail || `转写失败 (HTTP ${res.status})`); return false; }
       txCache.set(url, data);
       renderTranscript(panel, data);
+      return true;
     } catch (e) {
       panelError(panel, e.message || '网络错误，转写失败');
-    } finally {
-      stop(); setLoading(btn, false);
-    }
+      return false;
+    } finally { stop(); }
+  };
+
+  const loadMindmap = async (url, panel) => {
+    const hit = mindmapCache.get(url);
+    if (hit) { renderMindmap(panel, { ...hit, cached: true }); return true; }
+    const stop = panelLoading(panel, [
+      '正在提取字幕…', '正在让大模型梳理内容层级…', '正在生成思维导图…',
+    ]);
+    try {
+      const { res, data } = await dedup('mm:' + url, () => postJson('/api/mindmap', { url }));
+      if (!res.ok) {
+        panelError(panel, res.status === 503
+          ? `${data.detail || 'AI 未配置'}。${AI_CONFIG_HINT}`
+          : (data.detail || `思维导图生成失败 (HTTP ${res.status})`));
+        return false;
+      }
+      mindmapCache.set(url, data);
+      renderMindmap(panel, data);
+      return true;
+    } catch (e) {
+      panelError(panel, e.message || '网络错误，思维导图生成失败');
+      return false;
+    } finally { stop(); }
+  };
+
+  // 问答 Tab：仅渲染聊天界面（不预请求），真正提问时再打 /api/qa
+  const loadQA = (url, panel) => { renderQA(panel, url); return true; };
+
+  const TAB_LOADERS = { summary: loadSummary, transcript: loadTranscript, mindmap: loadMindmap, qa: loadQA };
+
+  /* ---------- Tab 切换：懒加载 + 防重复请求（思维导图/问答点到才加载） ---------- */
+  const activateTab = (card, tab) => {
+    card.querySelectorAll('[role="tab"]').forEach((b) => {
+      const on = b.dataset.tab === tab;
+      b.setAttribute('aria-selected', on ? 'true' : 'false');
+      b.className = on ? TAB_ACTIVE : TAB_IDLE;
+    });
+    card.querySelectorAll('.ai-tabpanel').forEach((p) => {
+      p.classList.toggle('hidden', p.dataset.panel !== tab);
+    });
+  };
+
+  const switchTab = async (card, url, tab) => {
+    activateTab(card, tab);
+    const st = card._aiState;
+    if (st.loaded.has(tab)) return;          // 已加载：仅切显隐，不重复请求
+    st.loaded.add(tab);
+    const panel = card.querySelector(`.ai-tabpanel[data-panel="${tab}"]`);
+    let ok = true;
+    try { ok = await TAB_LOADERS[tab](url, panel); }
+    catch (e) { ok = false; panelError(panel, e.message || '加载失败'); }
+    if (ok === false) st.loaded.delete(tab); // 失败允许再次点击重试
+  };
+
+  const openAiPanel = (card, url, tab) => {
+    card.querySelector('.ai-panel').classList.remove('hidden');
+    switchTab(card, url, tab);
   };
 
   /* ---------- 绑定卡片事件 ---------- */
@@ -299,7 +492,7 @@
     const dlBtn = cardEl.querySelector('.dl-btn');
     const select = cardEl.querySelector('.format-select');
     const status = cardEl.querySelector('.dl-status');
-    const panel = cardEl.querySelector('.ai-panel');
+    cardEl._aiState = { loaded: new Set() };   // 该卡片已加载的 Tab（懒加载 + 防重复请求）
     dlBtn.addEventListener('click', () => {
       const formatId = select ? select.value : null;
       status.className = 'dl-status mt-3 text-sm text-brand-600';
@@ -312,13 +505,19 @@
       }, 2500);
     });
 
+    // AI 总结 / 查看字幕：展开面板并切到对应 Tab（Tab 内懒加载内容）
     const aiBtn = cardEl.querySelector('.ai-btn');
     if (aiBtn) {
       if (!aiAvailable) aiBtn.title = '未检测到大模型配置，点击可查看如何启用';
-      aiBtn.addEventListener('click', () => handleSummarize(url, panel, aiBtn));
+      aiBtn.addEventListener('click', () => openAiPanel(cardEl, url, 'summary'));
     }
     const subBtn = cardEl.querySelector('.sub-btn');
-    if (subBtn) subBtn.addEventListener('click', () => handleTranscribe(url, panel, subBtn));
+    if (subBtn) subBtn.addEventListener('click', () => openAiPanel(cardEl, url, 'transcript'));
+
+    // Tab 栏点击切换（思维导图 / 问答 点到才加载，避免一进入就连打多次 LLM）
+    cardEl.querySelectorAll('[role="tab"]').forEach((tabBtn) => {
+      tabBtn.addEventListener('click', () => switchTab(cardEl, url, tabBtn.dataset.tab));
+    });
   };
 
   /* ---------- 单条解析流程 ---------- */

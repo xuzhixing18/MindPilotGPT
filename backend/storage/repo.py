@@ -126,3 +126,38 @@ def put_summary(
         row.title = title or ""
         row.summary = clean
         row.created_at = datetime.now(timezone.utc)
+
+
+def get_mindmap(key: str) -> dict[str, Any] | None:
+    """按 key 取思维导图缓存；未命中 / 缓存关闭 → None（返回纯 mindmap 数据）。"""
+    if not _enabled():
+        return None
+    with session() as s:
+        row = s.get(models.Mindmap, key)
+        if row is None:
+            return None
+        return dict(row.mindmap or {})
+
+
+def put_mindmap(
+    key: str,
+    mindmap: dict[str, Any],
+    *,
+    model: str,
+    prompt_version: str,
+    title: str = "",
+) -> None:
+    """写入 / 更新思维导图缓存（upsert）；剔除运行时 cached 标记后再存。"""
+    if not _enabled():
+        return
+    clean = {k: v for k, v in (mindmap or {}).items() if k != "cached"}
+    with session() as s:
+        row = s.get(models.Mindmap, key)
+        if row is None:
+            row = models.Mindmap(key=key)
+            s.add(row)
+        row.model = model or ""
+        row.prompt_version = prompt_version or ""
+        row.title = title or ""
+        row.mindmap = clean
+        row.created_at = datetime.now(timezone.utc)
