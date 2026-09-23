@@ -773,7 +773,7 @@
       .catch((e) => { st.loaded.delete(tab); panelError(panel, e.message || '加载失败'); return false; });
   };
 
-  // 一键 AI 分析：并行预取「总结 + 思维导图」（字幕解析时已预热），并定位到右栏
+  // 一键 AI 分析：并行预取「总结摘要 + 字幕文本 + 思维导图」三个 Tab，并定位到右栏
   const runAllAi = (card, url, btn) => {
     const panel = card.querySelector('.ai-panel');
     if (card.dataset.compact === '1') panel.classList.remove('hidden');
@@ -781,7 +781,11 @@
     const orig = btn.innerHTML;
     btn.disabled = true;
     btn.innerHTML = '<span class="inline-flex items-center gap-2"><span class="spinner"></span> 分析中…</span>';
-    Promise.all([prefetchTab(card, url, 'summary'), prefetchTab(card, url, 'mindmap')])
+    Promise.all([
+      prefetchTab(card, url, 'summary'),
+      prefetchTab(card, url, 'transcript'),
+      prefetchTab(card, url, 'mindmap'),
+    ])
       .finally(() => { btn.disabled = false; btn.innerHTML = orig; });
     panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   };
@@ -815,14 +819,14 @@
       }, 2500);
     });
 
-    // 一键 AI 分析：并行预取总结+思维导图并定位右栏（compact 时先展开面板）
+    // 一键 AI 分析：并行预取总结+字幕+思维导图并定位右栏（compact 时先展开面板）
     const aiBtn = cardEl.querySelector('.ai-btn');
     if (aiBtn) {
       if (!aiAvailable) aiBtn.title = '未检测到大模型配置，点击可查看如何启用';
       aiBtn.addEventListener('click', () => runAllAi(cardEl, url, aiBtn));
     }
 
-    // Tab 栏点击切换（思维导图 / 问答 点到才加载，避免一进入就连打多次 LLM）
+    // Tab 栏点击切换（除默认高赞评论外均点到才加载，避免一进入就连打多次 LLM/ASR）
     cardEl.querySelectorAll('[role="tab"]').forEach((tabBtn) => {
       tabBtn.addEventListener('click', () => switchTab(cardEl, url, tabBtn.dataset.tab));
     });
@@ -842,7 +846,7 @@
       resultSection.innerHTML = renderCard(info, url);
       const card = resultSection.firstElementChild;
       bindCard(card, url);
-      switchTab(card, url, 'transcript');   // 默认展示字幕 Tab（并预取共享字幕缓存）
+      switchTab(card, url, 'comments');   // 默认展示高赞评论 Tab（自动抓取，零 LLM 成本）；字幕改为点 Tab 或一键分析时才抓
       resultSection.scrollIntoView({ behavior: 'smooth', block: 'center' });
     } catch (e) {
       resultSection.innerHTML =
