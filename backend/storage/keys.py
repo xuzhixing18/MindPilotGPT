@@ -70,3 +70,9 @@ def mindmap_key(text: str, model: str, prompt_version: str) -> str:
     """思维导图缓存键：与 summary_key 同理，加域前缀避免与总结键空间混淆。"""
     raw = f"mindmap\x1f{text or ''}\x1f{model or ''}\x1f{prompt_version or ''}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def comments_key(url: str) -> str:
+    """评论缓存键：域前缀 + 规范化 URL 的 sha256（与转写键空间隔离）。"""
+    raw = f"comments\x1f{normalize_url(url)}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()

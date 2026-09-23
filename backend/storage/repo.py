@@ -161,3 +161,61 @@ def put_mindmap(
         row.title = title or ""
         row.mindmap = clean
         row.created_at = datetime.now(timezone.utc)
+
+
+def _comments_ttl_hours() -> int:
+    try:
+        return int((os.getenv("COMMENTS_CACHE_HOURS") or "12").strip())
+    except ValueError:
+        return 12
+
+
+def _comments_expired(created_at: datetime | None) -> bool:
+    """评论是否已过 TTL；``COMMENTS_CACHE_HOURS<=0`` 视为永不过期。"""
+    if created_at is None:
+        return True
+    hours = _comments_ttl_hours()
+    if hours <= 0:
+        return False
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=timezone.utc)
+    return datetime.now(timezone.utc) - created_at > timedelta(hours=hours)
+
+
+def _comment_to_dict(row: models.Comment) -> dict[str, Any]:
+    """ORM 行 → 与门面返回同构的 dict（不含 cached 标记）。"""
+    return {
+        "title": row.title,
+        "source": row.source,
+        "total": row.total,
+        "comments": row.comments or [],
+    }
+
+
+def get_comments(key: str) -> dict[str, Any] | None:
+    """按 key 取评论缓存；未命中 / 已过期 / 缓存关闭 → None。"""
+    if not _enabled():
+        return None
+    with session() as s:
+        row = s.get(models.Comment, key)
+        if row is None or _comments_expired(row.created_at):
+            return None
+        return _comment_to_dict(row)
+
+
+def put_comments(key: str, result: dict[str, Any], url: str, normalized_url: str = "") -> None:
+    """写入 / 更新评论缓存（upsert）。"""
+    if not _enabled():
+        return
+    with session() as s:
+        row = s.get(models.Comment, key)
+        if row is None:
+            row = models.Comment(key=key)
+            s.add(row)
+        row.url = url or ""
+        row.normalized_url = normalized_url or ""
+        row.title = result.get("title") or ""
+        row.source = result.get("source") or ""
+        row.total = int(result.get("total") or 0)
+        row.comments = result.get("comments") or []
+        row.created_at = datetime.now(timezone.utc)

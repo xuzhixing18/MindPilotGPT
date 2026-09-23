@@ -11,13 +11,14 @@ from __future__ import annotations
 
 from backend.storage import repo
 from backend.storage.db import Base, init_db, session
-from backend.storage.keys import mindmap_key, normalize_url, summary_key, transcript_key
+from backend.storage.keys import comments_key, mindmap_key, normalize_url, summary_key, transcript_key
 from backend.storage.singleflight import SingleFlight
 
-# 全局单例：转写 / 总结 / 思维导图各用一个 single-flight 通道（按 key 串行化并发相同请求）
+# 全局单例：转写 / 总结 / 思维导图 / 评论各用一个 single-flight 通道（按 key 串行化并发相同请求）
 transcribe_flight = SingleFlight()
 summary_flight = SingleFlight()
 mindmap_flight = SingleFlight()
+comments_flight = SingleFlight()
 
 __all__ = [
     "Base",
@@ -28,8 +29,10 @@ __all__ = [
     "transcript_key",
     "summary_key",
     "mindmap_key",
+    "comments_key",
     "SingleFlight",
     "transcribe_flight",
     "summary_flight",
     "mindmap_flight",
+    "comments_flight",
 ]

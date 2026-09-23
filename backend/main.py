@@ -34,7 +34,7 @@ _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from backend import ai, downloader, storage, transcribe
+from backend import ai, comments, downloader, storage, transcribe
 
 # 前端静态目录：项目根目录下的 frontend/
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
@@ -231,6 +231,30 @@ def post_qa(
         raise HTTPException(status_code=500, detail=f"问答出错：{exc}") from exc
 
     return JSONResponse(result)
+
+
+@app.post("/api/comments")
+def post_comments(
+    url: str = Body(..., embed=True, min_length=1),
+    refresh: bool = Body(False, embed=True),
+    limit: int = Body(20, embed=True, ge=1, le=50),
+) -> JSONResponse:
+    """抓取视频高赞评论（无大模型）。同步 def → 线程池执行，避免阻塞事件循环。
+
+    与总结/导图不同：不依赖 LLM 配置，未配 Key 也能用，故无 503。
+    """
+    try:
+        data = comments.fetch_comments(url, refresh=refresh, limit=limit)
+    except comments.CommentsNotSupportedError as exc:
+        # 平台不支持 / 无评论：400 + 友好提示（非服务器错误）
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except comments.CommentsError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"评论抓取出错：{exc}") from exc
+    return JSONResponse(data)
 
 
 # 静态前端（放在最后，避免覆盖 /api 路由）
