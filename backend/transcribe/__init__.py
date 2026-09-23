@@ -80,7 +80,7 @@ def _transcribe_via_asr(url: str) -> dict[str, Any]:
     return {
         "title": title,
         "language": result.get("language") or "",
-        "language_name": f"语音识别 · {provider}",
+        "language_name": "语音识别",
         "source": "asr",
         "segments": result.get("segments") or [],
         "text": text,

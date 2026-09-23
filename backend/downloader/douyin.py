@@ -286,6 +286,8 @@ def extract_info(url: str) -> dict[str, Any]:
         "uploader": (item.get("author") or {}).get("nickname"),
         "webpage_url": resolved,
         "extractor": "Douyin",
+        "view_count": (item.get("statistics") or {}).get("play_count"),
+        "description": item.get("desc"),
         "ffmpeg_available": True,  # 抖音为单文件，无需 ffmpeg 合并
         "formats": formats,
     }

@@ -164,6 +164,8 @@ def extract_info(url: str) -> dict[str, Any]:
         "uploader": info.get("uploader") or info.get("channel"),
         "webpage_url": info.get("webpage_url") or url,
         "extractor": info.get("extractor_key") or info.get("extractor"),
+        "view_count": info.get("view_count"),
+        "description": info.get("description"),
         "ffmpeg_available": common.ffmpeg_available(),
         "formats": formats,
     }
