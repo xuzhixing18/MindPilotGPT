@@ -34,7 +34,7 @@ _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from backend import ai, auth, comments, downloader, storage, transcribe
+from backend import ai, auth, comments, downloader, library, storage, transcribe
 
 # 前端静态目录：项目根目录下的 frontend/
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
@@ -56,6 +56,11 @@ app.add_middleware(
 # AUTH_ENABLED 默认 false——既有开放端点行为不变；auth 异常按 MRO 统一映射为 HTTP。
 app.add_exception_handler(auth.AuthError, auth.auth_error_handler)
 app.include_router(auth.router)
+
+# 私有资源包（历史/合集/问答会话）：/api/me/* 路由与语义化异常处理器。
+# 门禁不看灰度开关——私有资源永远要求登录；跨用户访问统一 404。
+app.add_exception_handler(library.LibraryError, library.library_error_handler)
+app.include_router(library.router)
 
 # 业务端点统一门禁（/api/health 与 /api/auth/* 不在此列，保持开放以供前端探测与登录）：
 #   AUTH_ENABLED=false（默认）              → 完全放行，行为与改造前一致；
@@ -93,16 +98,28 @@ def health() -> dict:
 @app.get("/api/info")
 def get_info(
     url: str = Query(..., min_length=1, description="视频链接"),
+    refresh: bool = Query(False, description="跳过缓存强制重新解析"),
     user: auth.CurrentUser = _AUTH_GATE,
 ) -> JSONResponse:
-    """解析视频信息。同步 def → 由 Starlette 线程池执行，避免阻塞事件循环。"""
+    """解析视频信息（带 DB 缓存）。同步 def → 由 Starlette 线程池执行。
+
+    二次打开（如点击历史记录）优先读 ``video_infos`` 缓存秒回，避免重复 yt-dlp
+    提取；未命中/过期才实时解析并回写。下载仍走实时解析，保证直链新鲜。
+    响应附带 ``content_key``（=transcript_key(url)）供前端「加入合集」使用。
+    """
+    key = storage.transcript_key(url)
+    if not refresh:
+        cached = storage.repo.get_info(key)
+        if cached:
+            return JSONResponse({**cached, "content_key": key, "cached": True})
     try:
         data = downloader.extract_info(url)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001 兜底，避免把堆栈直接暴露给前端
         raise HTTPException(status_code=500, detail=f"解析出错：{exc}") from exc
-    return JSONResponse(data)
+    storage.repo.put_info(key, data, url, storage.normalize_url(url))
+    return JSONResponse({**data, "content_key": key})
 
 
 @app.post("/api/download")
@@ -159,7 +176,14 @@ def post_transcribe(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"转写出错：{exc}") from exc
-    return JSONResponse(data)
+    resp = JSONResponse(data)
+    if user.is_authenticated:
+        # 历史记录异步写：不拖主响应、容忍丢（辅助数据）
+        resp.background = BackgroundTask(
+            library.record_action, user.user_id or "", url,
+            data.get("title") or "", "transcribe", data.get("source") or "",
+        )
+    return resp
 
 
 @app.post("/api/summarize")
@@ -186,7 +210,7 @@ def post_summarize(
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"总结出错：{exc}") from exc
 
-    return JSONResponse({
+    resp = JSONResponse({
         "title": tr.get("title"),
         "language": tr.get("language"),
         "source": tr.get("source"),
@@ -197,6 +221,11 @@ def post_summarize(
             "segment_count": len(tr.get("segments") or []),
         },
     })
+    if user.is_authenticated:
+        resp.background = BackgroundTask(
+            library.record_action, user.user_id or "", url, tr.get("title") or "", "summary",
+        )
+    return resp
 
 
 @app.post("/api/mindmap")
@@ -223,11 +252,16 @@ def post_mindmap(
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"思维导图出错：{exc}") from exc
 
-    return JSONResponse({
+    resp = JSONResponse({
         "title": tr.get("title"),
         "cached": bool(mindmap.get("cached")),
         "mindmap": mindmap,
     })
+    if user.is_authenticated:
+        resp.background = BackgroundTask(
+            library.record_action, user.user_id or "", url, tr.get("title") or "", "mindmap",
+        )
+    return resp
 
 
 @app.post("/api/qa")
@@ -235,15 +269,42 @@ def post_qa(
     url: str = Body(..., embed=True, min_length=1),
     question: str = Body(..., embed=True, min_length=1),
     history: list[dict] | None = Body(None, embed=True),
+    session_id: str | None = Body(None, embed=True, description="登录态续聊会话；空则新建"),
     user: auth.CurrentUser = _AUTH_GATE,
 ) -> JSONResponse:
-    """一站式：提取字幕 → 基于字幕内容回答一个问题（支持多轮上下文）。"""
+    """一站式：提取字幕 → 基于字幕内容回答一个问题（支持多轮上下文）。
+
+    登录态：会话持久化到 qa_sessions/qa_messages，上下文由服务端从 DB 组装
+    （history 参数仅作新建会话首轮的兼容回退）；响应附带 session_id 供续聊。
+    匿名：行为与改造前完全一致（无状态，history 由前端回传）。
+    """
     try:
         tr = transcribe.transcribe(url)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"转写出错：{exc}") from exc
+
+    if user.is_authenticated:
+        try:
+            result, sid = library.ask_in_session(
+                user.user_id or "",
+                session_id,
+                storage.transcript_key(url),
+                tr.get("title") or "",
+                tr["text"],
+                question,
+                fallback_history=history,
+            )
+        except library.LibraryError:
+            raise  # 语义化异常（如会话不属于本人）交应用级处理器映射 404
+        except ai.AINotConfiguredError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except ai.QAError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=500, detail=f"问答出错：{exc}") from exc
+        return JSONResponse({**result, "session_id": sid})
 
     try:
         result = ai.ask(tr["text"], tr.get("title", ""), question, history=history)
@@ -279,7 +340,13 @@ def post_comments(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"评论抓取出错：{exc}") from exc
-    return JSONResponse(data)
+    resp = JSONResponse(data)
+    if user.is_authenticated:
+        resp.background = BackgroundTask(
+            library.record_action, user.user_id or "", url,
+            data.get("title") or "", "comments", data.get("source") or "",
+        )
+    return resp
 
 
 # 静态前端（放在最后，避免覆盖 /api 路由）

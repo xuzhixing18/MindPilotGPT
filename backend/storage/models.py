@@ -13,7 +13,7 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 from typing import Any
 
-from sqlalchemy import JSON, Boolean, Date, DateTime, Integer, String, Text, false
+from sqlalchemy import JSON, Boolean, Date, DateTime, Index, Integer, String, Text, UniqueConstraint, false
 from sqlalchemy.orm import Mapped, mapped_column
 
 from backend.storage.db import Base
@@ -109,6 +109,31 @@ class Comment(Base):
         comment="写入/刷新时间（UTC），用于 TTL 过期判断",
     )
 
+class VideoInfo(Base):
+    """视频信息缓存（全局共享）：/api/info 解析结果快照，避免重复 yt-dlp 提取。
+
+    键与转写一致（``transcript_key(url)``），使历史/结果页二次打开秒回；
+    TTL 由 ``INFO_CACHE_HOURS`` 控制（默认 24h）。下载仍走实时解析，保证直链新鲜。
+    """
+
+    __tablename__ = "video_infos"
+    __table_args__ = {"comment": "视频信息缓存表（TTL=INFO_CACHE_HOURS）"}
+
+    key: Mapped[str] = mapped_column(
+        String(64), primary_key=True, comment="缓存主键：transcript_key(url)",
+    )
+    url: Mapped[str] = mapped_column(Text, default="", comment="原始视频链接（未规范化）")
+    normalized_url: Mapped[str] = mapped_column(
+        Text, default="", index=True, comment="规范化视频链接（跨链接形式命中同一缓存）",
+    )
+    payload: Mapped[dict[str, Any]] = mapped_column(
+        JSON, default=dict, comment="解析结果快照：标题/封面/时长/清晰度列表等",
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, comment="写入/刷新时间（UTC），用于 TTL 过期判断",
+    )
+
+
 class User(Base):
     """用户（多租户认证主体 + 个人资料）。
 
@@ -200,3 +225,101 @@ class UserSession(Base):
     user_agent: Mapped[str] = mapped_column(Text, default="", comment="创建时的 UA（设备列表展示）")
     ip: Mapped[str] = mapped_column(String(64), default="", comment="创建时的客户端 IP")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class UserHistory(Base):
+    """处理历史（私有）：每 (用户, 视频) 一行，``kinds`` 聚合已生成的内容。
+
+    ``content_key`` 取 ``transcript_key(url)`` 作为视频身份键，**只记归属与时间线、
+    不复制内容**；title/url 为快照，全局缓存过期后历史列表仍可读。
+    """
+
+    __tablename__ = "user_history"
+    __table_args__ = (
+        UniqueConstraint("user_id", "content_key", name="uq_user_history_user_content"),
+        Index("ix_user_history_user_updated", "user_id", "updated_at"),
+        {"comment": "用户处理历史（私有，按 user_id 列级隔离）"},
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, comment="uuid4 hex")
+    user_id: Mapped[str] = mapped_column(String(32), comment="归属用户")
+    content_key: Mapped[str] = mapped_column(String(64), default="", comment="视频身份键 = transcript_key(url)")
+    url: Mapped[str] = mapped_column(Text, default="", comment="原始链接快照（结果页回用）")
+    title: Mapped[str] = mapped_column(Text, default="", comment="标题快照（缓存过期仍可读）")
+    kinds: Mapped[list[Any]] = mapped_column(
+        JSON, default=list, comment="已生成内容：transcribe/summary/mindmap/comments/qa 子集",
+    )
+    source: Mapped[str] = mapped_column(String(32), default="", comment="来源平台：bilibili / douyin / generic")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, comment="最近活跃时间（列表排序键）",
+    )
+
+
+class QaSession(Base):
+    """问答会话（私有）：同一视频可多会话；消息在 qa_messages 表 append-only 持久化。"""
+
+    __tablename__ = "qa_sessions"
+    __table_args__ = (
+        Index("ix_qa_sessions_user_content", "user_id", "content_key"),
+        Index("ix_qa_sessions_user_updated", "user_id", "updated_at"),
+        {"comment": "用户问答会话（私有，跨设备续聊）"},
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, comment="uuid4 hex")
+    user_id: Mapped[str] = mapped_column(String(32), comment="归属用户")
+    content_key: Mapped[str] = mapped_column(String(64), default="", comment="视频身份键")
+    title: Mapped[str] = mapped_column(Text, default="", comment="会话名（默认视频标题，可改名）")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, comment="最近一轮问答时间",
+    )
+
+
+class QaMessage(Base):
+    """问答消息（append-only）：单条内容服务端截断 ≤2000 字。"""
+
+    __tablename__ = "qa_messages"
+    __table_args__ = (
+        Index("ix_qa_messages_session_created", "session_id", "created_at"),
+        {"comment": "问答消息（append-only，随会话级联删除）"},
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, comment="uuid4 hex")
+    session_id: Mapped[str] = mapped_column(String(32), comment="归属会话")
+    role: Mapped[str] = mapped_column(String(16), default="user", comment="user / assistant")
+    content: Mapped[str] = mapped_column(Text, default="", comment="消息内容")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class Collection(Base):
+    """合集（私有）：用户对视频及其解析内容的主动组织。"""
+
+    __tablename__ = "collections"
+    __table_args__ = {"comment": "用户合集（私有）"}
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, comment="uuid4 hex")
+    user_id: Mapped[str] = mapped_column(String(32), index=True, comment="归属用户")
+    name: Mapped[str] = mapped_column(String(40), default="", comment="合集名（≤40 字）")
+    description: Mapped[str] = mapped_column(Text, default="", comment="可选描述")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow,
+    )
+
+
+class CollectionItem(Base):
+    """合集条目：快照 title/url，与历史行解耦（删历史不影响合集展示）。"""
+
+    __tablename__ = "collection_items"
+    __table_args__ = (
+        UniqueConstraint("collection_id", "content_key", name="uq_collection_item"),
+        {"comment": "合集条目（同一合集内视频唯一）"},
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, comment="uuid4 hex")
+    collection_id: Mapped[str] = mapped_column(String(32), index=True, comment="归属合集")
+    content_key: Mapped[str] = mapped_column(String(64), default="", comment="视频身份键")
+    url: Mapped[str] = mapped_column(Text, default="", comment="原始链接快照")
+    title: Mapped[str] = mapped_column(Text, default="", comment="标题快照")
+    added_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)

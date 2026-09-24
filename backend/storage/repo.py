@@ -219,3 +219,49 @@ def put_comments(key: str, result: dict[str, Any], url: str, normalized_url: str
         row.total = int(result.get("total") or 0)
         row.comments = result.get("comments") or []
         row.created_at = datetime.now(timezone.utc)
+
+
+def _info_ttl_hours() -> int:
+    try:
+        return int((os.getenv("INFO_CACHE_HOURS") or "24").strip())
+    except ValueError:
+        return 24
+
+
+def _info_expired(created_at: datetime | None) -> bool:
+    """视频信息是否已过 TTL；``INFO_CACHE_HOURS<=0`` 视为永不过期。"""
+    if created_at is None:
+        return True
+    hours = _info_ttl_hours()
+    if hours <= 0:
+        return False
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=timezone.utc)
+    return datetime.now(timezone.utc) - created_at > timedelta(hours=hours)
+
+
+def get_info(key: str) -> dict[str, Any] | None:
+    """按 key 取视频信息缓存；未命中 / 已过期 / 缓存关闭 → None。"""
+    if not _enabled():
+        return None
+    with session() as s:
+        row = s.get(models.VideoInfo, key)
+        if row is None or _info_expired(row.created_at):
+            return None
+        return dict(row.payload or {})
+
+
+def put_info(key: str, payload: dict[str, Any], url: str, normalized_url: str = "") -> None:
+    """写入 / 更新视频信息缓存（upsert）；剔除运行时 cached 标记后再存。"""
+    if not _enabled():
+        return
+    clean = {k: v for k, v in (payload or {}).items() if k != "cached"}
+    with session() as s:
+        row = s.get(models.VideoInfo, key)
+        if row is None:
+            row = models.VideoInfo(key=key)
+            s.add(row)
+        row.url = url or ""
+        row.normalized_url = normalized_url or ""
+        row.payload = clean
+        row.created_at = datetime.now(timezone.utc)
