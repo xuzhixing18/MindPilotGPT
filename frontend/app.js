@@ -15,6 +15,10 @@
 
   let batchMode = false;
   let aiAvailable = false; // 由 /api/health 告知，用于 AI 总结按钮的可用性提示
+  // 认证态（均由 /api/health 与 /api/auth/me 告知；Cookie 为 httpOnly，前端不直读）
+  let authEnabled = false;  // 是否提供登录能力（决定导航是否显示登录/注册）
+  let authRequired = false; // 业务端点是否强制登录（与后端门禁同一判据）
+  let currentUser = null;   // 已登录用户的完整资料（/api/auth/me 回传）或 null
 
   // 会话级缓存与并发去重：同一 url 重复点击秒回、并发点击只发一次请求
   const txCache = new Map();       // url -> 转写结果
@@ -236,6 +240,8 @@
       const res = await fetch('/api/health');
       const data = await res.json();
       aiAvailable = !!data.ai;
+      authEnabled = !!data.auth;
+      authRequired = !!data.auth_required;
       if (!data.ffmpeg) {
         ffmpegTip.classList.remove('hidden');
         ffmpegTip.classList.add('inline-flex');
@@ -244,11 +250,18 @@
           '<span>未检测到 ffmpeg，仅提供已合成的清晰度（安装后可解锁高清合并）</span>';
       }
     } catch (e) { /* 忽略 */ }
+    // 无论健康检查成败都要刷一次登录态（决定导航形态与是否拦截解析）
+    await refreshAuthState();
   };
 
   /* ---------- 解析单个视频 ---------- */
   const parseInfo = async (url) => {
     const res = await fetch(`/api/info?url=${encodeURIComponent(url)}`);
+    // 401 = 未登录 / 会话已失效：清本地态并弹登录框（后端门禁是最终裁决）
+    if (res.status === 401) {
+      markUnauthorized();
+      throw new Error('登录状态已失效，请重新登录后再解析。');
+    }
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       throw new Error(err.detail || `解析失败 (HTTP ${res.status})`);
@@ -638,6 +651,7 @@
       body: JSON.stringify(body),
     });
     const data = await res.json().catch(() => ({}));
+    if (res.status === 401) markUnauthorized();   // 会话中途失效：统一弹登录框
     return { res, data };
   };
 
@@ -834,6 +848,7 @@
 
   /* ---------- 单条解析流程 ---------- */
   const handleParse = async () => {
+    if (!ensureAuth(handleParse)) return;   // 未登录：弹框拦截，登录成功后自动续做
     const url = urlInput.value.trim();
     if (!url) { urlInput.focus(); return; }
     parseBtn.disabled = true;
@@ -859,6 +874,7 @@
 
   /* ---------- 批量解析流程 ---------- */
   const handleBatch = async () => {
+    if (!ensureAuth(handleBatch)) return;
     const urls = batchUrls.value.split('\n').map((s) => s.trim()).filter(Boolean);
     if (!urls.length) { batchUrls.focus(); return; }
     batchBtn.disabled = true;
@@ -938,6 +954,601 @@
   const closePay = () => { payModal.classList.add('hidden'); payModal.classList.remove('flex'); };
   $('#pay-close').addEventListener('click', closePay);
   payModal.addEventListener('click', (e) => { if (e.target === payModal) closePay(); });
+
+  /* ---------- 认证：登录 / 注册 / 记住我 / 登出 ---------- */
+  const authModal = $('#auth-modal');
+  const authForm = $('#auth-form');
+  const authTitle = $('#auth-title');
+  const authSubtitle = $('#auth-subtitle');
+  const authTabLogin = $('#auth-tab-login');
+  const authTabRegister = $('#auth-tab-register');
+  const authIdentifierWrap = $('#auth-identifier-wrap');
+  const authIdentifier = $('#auth-identifier');
+  const authEmailWrap = $('#auth-email-wrap');
+  const authEmail = $('#auth-email');
+  const authPhoneWrap = $('#auth-phone-wrap');
+  const authPhone = $('#auth-phone');
+  const authNicknameWrap = $('#auth-nickname-wrap');
+  const authNickname = $('#auth-nickname');
+  const authHint = $('#auth-hint');
+  const authPassword = $('#auth-password');
+  const authPasswordLabel = $('#auth-password-label');
+  const authRememberWrap = $('#auth-remember-wrap');
+  const authRemember = $('#auth-remember');
+  const authError = $('#auth-error');
+  const authSubmit = $('#auth-submit');
+  const navLogin = $('#nav-login');
+  const navRegister = $('#nav-register');
+  const navUser = $('#nav-user');
+  const navProfile = $('#nav-profile');
+  const navAvatarImg = $('#nav-avatar-img');
+  const navAvatarIcon = $('#nav-avatar-icon');
+  const navUserName = $('#nav-user-name');
+  const navLogout = $('#nav-logout');
+
+  // 胶囊 Tab 的选中/未选中态（风格对齐顶部 TAB_ACTIVE / TAB_IDLE）
+  const AUTH_TAB_ON = 'auth-tab flex-1 rounded-full bg-white py-1.5 font-semibold text-brand-600 shadow-sm';
+  const AUTH_TAB_OFF = 'auth-tab flex-1 rounded-full py-1.5 font-semibold text-slate-500 transition hover:text-slate-800';
+
+  let authMode = 'login';      // 'login' | 'register'
+  let pendingAction = null;    // 被登录拦截的动作，登录成功后自动续做
+
+  const authMsg = (el, text) => {
+    el.textContent = text || '';
+    el.classList.toggle('hidden', !text);
+  };
+
+  // 头像渲染：有 avatar_url 则显示图片，否则回退到占位元素（导航人形图标 / 个人资料首字母）
+  const renderAvatar = (img, fallbackEl, url) => {
+    if (url) {
+      img.classList.remove('hidden');
+      fallbackEl.classList.add('hidden');
+      // 仅在地址变化时重设 src：避免每次渲染都重新拉图造成闪烁
+      if (img.getAttribute('src') !== url) {
+        img.onerror = () => { img.classList.add('hidden'); fallbackEl.classList.remove('hidden'); };
+        img.src = url;
+      }
+    } else {
+      img.classList.add('hidden');
+      img.removeAttribute('src');
+      fallbackEl.classList.remove('hidden');
+    }
+  };
+
+  // 切换登录/注册形态：
+  //   登录 = 单个「邮箱或手机号」输入框 + 记住我
+  //   注册 = 邮箱（选填）+ 手机号（选填）+ 昵称，二者至少填一项（后端最终裁决）
+  const setAuthMode = (mode) => {
+    authMode = mode;
+    const reg = mode === 'register';
+    authTitle.textContent = reg ? '注册 MindPilot' : '登录 MindPilot';
+    authSubtitle.textContent = reg ? '注册后即可解析、下载与使用 AI 分析。' : '登录后即可解析、下载与使用 AI 分析。';
+    authSubmit.textContent = reg ? '注册并登录' : '登录';
+    authIdentifierWrap.classList.toggle('hidden', reg);
+    authEmailWrap.classList.toggle('hidden', !reg);
+    authPhoneWrap.classList.toggle('hidden', !reg);
+    authNicknameWrap.classList.toggle('hidden', !reg);
+    authHint.classList.toggle('hidden', !reg);
+    authRememberWrap.classList.toggle('hidden', reg);
+    authPasswordLabel.textContent = reg ? '设置密码' : '密码';
+    authPassword.setAttribute('autocomplete', reg ? 'new-password' : 'current-password');
+    authTabLogin.className = reg ? AUTH_TAB_OFF : AUTH_TAB_ON;
+    authTabRegister.className = reg ? AUTH_TAB_ON : AUTH_TAB_OFF;
+    authMsg(authError, '');
+  };
+
+  // 导航形态：鉴权关闭时不显示任何登录入口，保持原有纯工具站体验
+  const renderAuthState = () => {
+    const logged = !!currentUser;
+    navLogin.classList.toggle('hidden', !authEnabled || logged);
+    navRegister.classList.toggle('hidden', !authEnabled || logged);
+    navUser.classList.toggle('hidden', !logged);
+    navUser.classList.toggle('flex', logged);
+    if (!logged) return;
+    navUserName.textContent = currentUser.nickname || currentUser.email || currentUser.phone || '';
+    renderAvatar(navAvatarImg, navAvatarIcon, currentUser.avatar_url);
+  };
+
+  const openAuth = (mode = 'login') => {
+    setAuthMode(mode);
+    authModal.classList.remove('hidden');
+    authModal.classList.add('flex');
+    setTimeout(() => (mode === 'register' ? authEmail : authIdentifier).focus(), 60);
+  };
+
+  const closeAuth = () => {
+    authModal.classList.add('hidden');
+    authModal.classList.remove('flex');
+    pendingAction = null;      // 主动关闭 = 放弃被拦截的动作
+  };
+
+  // 会话失效（任意业务接口 401）：清本地态并弹登录框
+  const markUnauthorized = () => {
+    currentUser = null;
+    renderAuthState();
+    if (authRequired) openAuth('login');
+  };
+
+  // 拉取当前登录态：/api/auth/me 返回 401 即未登录（Cookie 为 httpOnly，前端不直读）
+  const refreshAuthState = async () => {
+    currentUser = null;
+    if (authEnabled) {
+      try {
+        const res = await fetch('/api/auth/me');
+        if (res.ok) currentUser = (await res.json()).user || null;
+      } catch (e) { /* 网络异常按未登录处理 */ }
+    }
+    renderAuthState();
+  };
+
+  // 前端门禁：需登录却未登录时弹框并返回 false（后端 401 才是最终裁决）
+  const ensureAuth = (onAuthed) => {
+    if (!authRequired || currentUser) return true;
+    pendingAction = onAuthed || null;
+    openAuth('login');
+    return false;
+  };
+
+  // 登录：成功后写入本地态、关框，并续做被拦截的动作
+  // identifier 为「邮箱或手机号」，具体类型由后端判定（含 @ 视为邮箱）
+  const doLogin = async (identifier, password, remember) => {
+    const res = await fetch('/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ identifier, password, remember }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      authMsg(authError, data.detail || `登录失败 (HTTP ${res.status})`);
+      return false;
+    }
+    const act = pendingAction;      // 必须先取出：closeAuth() 会清空 pendingAction
+    currentUser = data.user || null;
+    renderAuthState();
+    closeAuth();
+    authPassword.value = '';
+    if (act) setTimeout(act, 0);   // 让弹窗先收起再发起解析，避免界面抢焦点
+    return true;
+  };
+
+  authForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const password = authPassword.value;
+    authMsg(authError, '');
+
+    // 两种模式走不同校验：注册收集邮箱/手机号（至少一项），登录只收一个标识符
+    const reg = authMode === 'register';
+    let identifier = '';
+    let registerPayload = null;
+    if (reg) {
+      const email = authEmail.value.trim();
+      const phone = authPhone.value.trim();
+      if (!email && !phone) { authMsg(authError, '请至少填写邮箱或手机号其中一项。'); return; }
+      if (!password) { authMsg(authError, '请设置密码。'); return; }
+      registerPayload = {
+        email: email || null,
+        phone: phone || null,
+        password,
+        nickname: authNickname.value.trim() || null,
+      };
+      identifier = email || phone;   // 注册成功后用它自动登录
+    } else {
+      identifier = authIdentifier.value.trim();
+      if (!identifier || !password) { authMsg(authError, '请填写邮箱/手机号与密码。'); return; }
+    }
+
+    authSubmit.disabled = true;
+    authSubmit.innerHTML = '<span class="inline-flex items-center justify-center gap-2"><span class="spinner"></span> 处理中…</span>';
+    try {
+      if (registerPayload) {
+        const res = await fetch('/api/auth/register', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(registerPayload),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) { authMsg(authError, data.detail || `注册失败 (HTTP ${res.status})`); return; }
+        // 注册成功即自动登录（少一次交互）；若登录失败则退回登录 Tab 并保留原因
+        const okLogin = await doLogin(identifier, password, authRemember.checked);
+        if (!okLogin) {
+          const reason = authError.textContent;
+          setAuthMode('login');
+          authIdentifier.value = identifier;   // 回填标识符，用户只需再输一次密码
+          authMsg(authError, reason || '注册成功，请用刚才的账号密码登录。');
+        }
+      } else {
+        await doLogin(identifier, password, authRemember.checked);
+      }
+    } catch (err) {
+      authMsg(authError, err.message || '网络错误，请稍后重试。');
+    } finally {
+      authSubmit.disabled = false;
+      // 按当前模式恢复按钮文案（注册失败退回登录 Tab 时 label 已过期）
+      authSubmit.textContent = authMode === 'register' ? '注册并登录' : '登录';
+    }
+  });
+
+  navLogin.addEventListener('click', () => openAuth('login'));
+  navRegister.addEventListener('click', () => openAuth('register'));
+  authTabLogin.addEventListener('click', () => setAuthMode('login'));
+  authTabRegister.addEventListener('click', () => setAuthMode('register'));
+  $('#auth-close').addEventListener('click', closeAuth);
+  authModal.addEventListener('click', (e) => { if (e.target === authModal) closeAuth(); });
+
+  /* ---------- 个人资料：双 Tab + 常驻底部操作栏 ----------
+     报错信息一律跟随触发它的上下文：头像行 / 各安全卡片 / 底部状态栏，
+     不再共用一个远离操作点的提示框。 */
+  const profileModal = $('#profile-modal');
+  const profileHeadAvatar = $('#profile-head-avatar');
+  const profileHeadInitial = $('#profile-head-initial');
+  const profileHeadName = $('#profile-head-name');
+  const profileHeadSub = $('#profile-head-sub');
+  const profileTabBasic = $('#profile-tab-basic');
+  const profileTabSecurity = $('#profile-tab-security');
+  const profilePanelBasic = $('#profile-panel-basic');
+  const profilePanelSecurity = $('#profile-panel-security');
+  const profileFooterBasic = $('#profile-footer-basic');
+  const profileFooterSecurity = $('#profile-footer-security');
+  const profileStatus = $('#profile-status');
+  const profileForm = $('#profile-form');
+  const profileSave = $('#profile-save');
+  const profileAvatarImg = $('#profile-avatar-img');
+  const profileAvatarInitial = $('#profile-avatar-initial');
+  const profileAvatarBtn = $('#profile-avatar-btn');
+  const profileAvatarRemove = $('#profile-avatar-remove');
+  const profileAvatarFile = $('#profile-avatar-file');
+  const profileAvatarMsg = $('#profile-avatar-msg');
+  const profileNickname = $('#profile-nickname');
+  const profileGender = $('#profile-gender');
+  const profileBirthday = $('#profile-birthday');
+  const profileLocation = $('#profile-location');
+  const profileBio = $('#profile-bio');
+  const profileBioCount = $('#profile-bio-count');
+  const profileWebsite = $('#profile-website');
+  const profileEmailToggle = $('#profile-email-toggle');
+  const profileEmailEdit = $('#profile-email-edit');
+  const profileEmailValue = $('#profile-email-value');
+  const profileEmailPassword = $('#profile-email-password');
+  const profileEmailMsg = $('#profile-email-msg');
+  const profilePhoneToggle = $('#profile-phone-toggle');
+  const profilePhoneEdit = $('#profile-phone-edit');
+  const profilePhoneValue = $('#profile-phone-value');
+  const profilePhonePassword = $('#profile-phone-password');
+  const profilePhoneMsg = $('#profile-phone-msg');
+  const profilePwdToggle = $('#profile-pwd-toggle');
+  const profilePwdEdit = $('#profile-pwd-edit');
+  const profilePwdCurrent = $('#profile-pwd-current');
+  const profilePwdNew = $('#profile-pwd-new');
+  const profilePwdMsg = $('#profile-pwd-msg');
+
+  const TAB_ON = 'flex-1 rounded-lg bg-white py-1.5 text-sm font-semibold text-brand-600 shadow-sm';
+  const TAB_OFF = 'flex-1 rounded-lg py-1.5 text-sm font-semibold text-slate-500 transition hover:text-slate-800';
+  const STATUS_TONE = { idle: 'text-slate-400', dirty: 'text-amber-600', ok: 'text-emerald-600', err: 'text-rose-600' };
+  const PLAN_LABELS = { free: '免费版', pro: '专业版', team: '团队版' };
+
+  // 打开弹窗时的资料快照：保存时只提交**变更过**的字段，配合后端 exclude_unset 语义
+  let profileSnapshot = {};
+
+  // 行内提示：只改 hidden 与颜色，边距由 HTML 决定（各上下文自带合适的 mt-）
+  const setMsg = (el, text, ok = true) => {
+    if (!el) return;
+    el.textContent = text || '';
+    el.classList.toggle('hidden', !text);
+    el.classList.toggle('text-rose-600', Boolean(text) && !ok);
+    el.classList.toggle('text-emerald-600', Boolean(text) && ok);
+  };
+
+  // 底部状态栏：未修改 / 有未保存 / 成功 / 失败 四态
+  const setStatus = (text, tone = 'idle') => {
+    profileStatus.textContent = text || '';
+    profileStatus.className = `min-w-0 flex-1 text-xs leading-relaxed ${STATUS_TONE[tone] || STATUS_TONE.idle}`;
+  };
+
+  // 统一的认证接口调用：解包 {"detail": ...} 信封，失败抛出带状态码的 Error
+  const authFetch = async (url, options = {}) => {
+    const res = await fetch(url, options);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const err = new Error(data.detail || `请求失败 (HTTP ${res.status})`);
+      err.status = res.status;
+      throw err;
+    }
+    return data;
+  };
+
+  const formatDate = (value) => {
+    if (!value) return '-';
+    const d = new Date(value);
+    if (Number.isNaN(d.getTime())) return String(value);
+    const p = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+  };
+
+  // 无头像时的首字母占位（取昵称/邮箱/手机号的首字符）
+  const initialOf = (name) => {
+    const text = String(name || '').trim();
+    return text ? text[0].toUpperCase() : '·';
+  };
+
+  const setProfileTab = (tab) => {
+    const basic = tab !== 'security';
+    profileTabBasic.className = basic ? TAB_ON : TAB_OFF;
+    profileTabSecurity.className = basic ? TAB_OFF : TAB_ON;
+    profilePanelBasic.classList.toggle('hidden', !basic);
+    profilePanelSecurity.classList.toggle('hidden', basic);
+    profileFooterBasic.classList.toggle('hidden', !basic);
+    profileFooterBasic.classList.toggle('flex', basic);
+    profileFooterSecurity.classList.toggle('hidden', basic);
+    profileFooterSecurity.classList.toggle('flex', !basic);
+  };
+
+  // 头部身份锚点：头像 + 昵称 + 主标识符
+  const renderHead = () => {
+    const u = currentUser || {};
+    const name = u.nickname || u.email || u.phone || '个人资料';
+    profileHeadName.textContent = name;
+    const bits = [];
+    if (u.email) bits.push(u.email);
+    if (u.phone) bits.push(u.phone);
+    profileHeadSub.textContent = bits.join(' · ') || '管理你的资料与账号安全';
+    renderAvatar(profileHeadAvatar, profileHeadInitial, u.avatar_url);
+    profileHeadInitial.textContent = initialOf(name);
+  };
+
+  // 表单当前值（与快照对比得出「是否有未保存修改」）
+  const collectForm = () => ({
+    nickname: profileNickname.value.trim(),
+    gender: profileGender.value,
+    birthday: profileBirthday.value,   // <input type="date"> 清空即 ''，后端按「清除生日」处理
+    location: profileLocation.value.trim(),
+    bio: profileBio.value,             // 不 trim：保留用户有意的换行
+    website: profileWebsite.value.trim(),
+  });
+
+  const refreshDirty = () => {
+    const next = collectForm();
+    const dirty = Object.keys(next).some((k) => next[k] !== profileSnapshot[k]);
+    profileSave.disabled = !dirty;
+    setStatus(dirty ? '有未保存的修改' : '', dirty ? 'dirty' : 'idle');
+  };
+
+  // 表单区（头像 + 可编辑资料）
+  const renderProfileForm = () => {
+    const u = currentUser || {};
+    profileSnapshot = {
+      nickname: u.nickname || '',
+      gender: u.gender || 'unknown',
+      birthday: u.birthday ? String(u.birthday).slice(0, 10) : '',
+      location: u.location || '',
+      bio: u.bio || '',
+      website: u.website || '',
+    };
+    profileNickname.value = profileSnapshot.nickname;
+    profileGender.value = profileSnapshot.gender;
+    profileBirthday.value = profileSnapshot.birthday;
+    profileLocation.value = profileSnapshot.location;
+    profileBio.value = profileSnapshot.bio;
+    profileWebsite.value = profileSnapshot.website;
+    profileBioCount.textContent = String(profileBio.value.length);
+
+    renderAvatar(profileAvatarImg, profileAvatarInitial, u.avatar_url);
+    profileAvatarInitial.textContent = initialOf(u.nickname || u.email || u.phone);
+    profileAvatarRemove.classList.toggle('hidden', !u.avatar_url);
+    refreshDirty();
+  };
+
+  // 账号与安全区（标识符、验证状态、只读信息）
+  const renderAccount = () => {
+    const u = currentUser || {};
+    $('#profile-email').textContent = u.email || '未绑定';
+    $('#profile-email-badge').classList.toggle('hidden', !u.email || !!u.email_verified);
+    $('#profile-email-toggle').textContent = u.email ? '更换' : '绑定';
+    $('#profile-phone').textContent = u.phone || '未绑定';
+    $('#profile-phone-badge').classList.toggle('hidden', !u.phone || !!u.phone_verified);
+    $('#profile-phone-toggle').textContent = u.phone ? '更换' : '绑定';
+    $('#profile-created').textContent = formatDate(u.created_at);
+    $('#profile-plan').textContent = PLAN_LABELS[u.plan_id] || u.plan_id || '免费版';
+    $('#profile-email-verified').textContent = u.email ? (u.email_verified ? '已验证' : '未验证') : '-';
+    $('#profile-phone-verified').textContent = u.phone ? (u.phone_verified ? '已验证' : '未验证') : '-';
+    $('#profile-uid').textContent = u.id || '-';
+  };
+
+  // 应用服务端回传的最新资料；keepForm=true 时不回填表单，避免覆盖用户正在编辑的内容
+  const applyUser = (data, keepForm = false) => {
+    if (!data || !data.user) return;
+    currentUser = data.user;
+    renderHead();
+    if (!keepForm) renderProfileForm();
+    renderAccount();
+    renderAuthState();
+  };
+
+  const closeProfile = () => {
+    profileModal.classList.add('hidden');
+    profileModal.classList.remove('flex');
+    setProfileTab('basic');
+    [profileEmailEdit, profilePhoneEdit, profilePwdEdit].forEach((p) => p.classList.add('hidden'));
+    [profileAvatarMsg, profileEmailMsg, profilePhoneMsg, profilePwdMsg].forEach((el) => setMsg(el, ''));
+    setStatus('');
+    // 收起即清空密码类输入，避免明文残留在 DOM 里
+    profileModal.querySelectorAll('input[type="password"]').forEach((el) => { el.value = ''; });
+  };
+
+  // 先用本地态立即渲染（不白屏），再拉一次服务端最新值覆盖
+  const openProfile = async () => {
+    if (!currentUser) return;
+    setProfileTab('basic');
+    setStatus('');
+    renderHead();
+    renderProfileForm();
+    renderAccount();
+    profileModal.classList.remove('hidden');
+    profileModal.classList.add('flex');
+    try {
+      applyUser(await authFetch('/api/auth/me'));
+    } catch (err) {
+      if (err.status === 401) { closeProfile(); markUnauthorized(); return; }
+      setStatus(err.message || '资料加载失败，请稍后重试。', 'err');
+    }
+  };
+
+  // 保存资料：只提交变更过的字段；结果反馈在底部状态栏（紧邻保存按钮）
+  const saveProfile = async () => {
+    const next = collectForm();
+    const changes = {};
+    Object.keys(next).forEach((k) => { if (next[k] !== profileSnapshot[k]) changes[k] = next[k]; });
+    if (!Object.keys(changes).length) { setStatus('没有需要保存的改动。'); return; }
+
+    const label = profileSave.textContent;
+    profileSave.disabled = true;
+    profileSave.textContent = '保存中…';
+    setStatus('');
+    try {
+      applyUser(await authFetch('/api/auth/me', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(changes),
+      }));
+      setStatus('资料已保存。', 'ok');   // applyUser 已把按钮置回禁用（无未保存项）
+    } catch (err) {
+      setStatus(err.message || '保存失败，请稍后重试。', 'err');
+      profileSave.disabled = false;      // 失败保留可重试
+    } finally {
+      profileSave.textContent = label;
+    }
+  };
+
+  profileSave.addEventListener('click', saveProfile);
+  profileForm.addEventListener('submit', (e) => { e.preventDefault(); saveProfile(); });
+  // 保存按钮在底部栏（form 之外），表单内又无 submit 按钮，浏览器不会对多输入框表单做隐式提交；
+  // 这里补上回车路径（textarea 的回车是换行，排除）
+  profileForm.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' || e.target.tagName === 'TEXTAREA') return;
+    e.preventDefault();
+    saveProfile();
+  });
+  [profileNickname, profileGender, profileBirthday, profileLocation, profileBio, profileWebsite]
+    .forEach((el) => {
+      const onChange = () => {
+        if (el === profileBio) profileBioCount.textContent = String(profileBio.value.length);
+        refreshDirty();
+      };
+      el.addEventListener('input', onChange);
+      el.addEventListener('change', onChange);
+    });
+
+  // 头像上传：用 FormData 交给浏览器生成 multipart boundary（**不可**手设 Content-Type）
+  profileAvatarBtn.addEventListener('click', () => profileAvatarFile.click());
+  profileAvatarFile.addEventListener('change', async () => {
+    const file = profileAvatarFile.files && profileAvatarFile.files[0];
+    profileAvatarFile.value = '';   // 立刻清空：允许再次选同一文件重试
+    if (!file) return;
+    const form = new FormData();
+    form.append('file', file);
+    setMsg(profileAvatarMsg, '');
+    try {
+      applyUser(await authFetch('/api/auth/me/avatar', { method: 'POST', body: form }));
+      setMsg(profileAvatarMsg, '头像已更新。');
+    } catch (err) {
+      setMsg(profileAvatarMsg, err.message || '头像上传失败。', false);
+    }
+  });
+
+  profileAvatarRemove.addEventListener('click', async () => {
+    setMsg(profileAvatarMsg, '');
+    try {
+      applyUser(await authFetch('/api/auth/me/avatar', { method: 'DELETE' }));
+      setMsg(profileAvatarMsg, '头像已移除。');
+    } catch (err) {
+      setMsg(profileAvatarMsg, err.message || '头像移除失败。', false);
+    }
+  });
+
+  // 邮箱/手机号/密码三个折叠面板行为同构：展开 → 填当前密码 → 确认/取消。
+  // 成功与失败都反馈在**本卡片内**的 msg 行，不跨区提示。
+  const bindSecurePanel = (toggle, panel, saveBtn, cancelBtn, msgEl, secretInputs, onSubmit) => {
+    const collapse = () => {
+      panel.classList.add('hidden');
+      secretInputs.forEach((el) => { el.value = ''; });
+    };
+    toggle.addEventListener('click', () => {
+      const willOpen = panel.classList.contains('hidden');
+      panel.classList.toggle('hidden', !willOpen);
+      setMsg(msgEl, '');
+      if (willOpen) setTimeout(() => secretInputs[0].focus(), 30);
+    });
+    cancelBtn.addEventListener('click', () => { collapse(); setMsg(msgEl, ''); });
+    saveBtn.addEventListener('click', async () => {
+      const label = saveBtn.textContent;
+      saveBtn.disabled = true;
+      saveBtn.textContent = '处理中…';
+      setMsg(msgEl, '');
+      try {
+        // onSubmit 返回 false = 本地校验未过：保持展开；否则收起编辑区（msg 留在卡片内）
+        if (await onSubmit() !== false) collapse();
+      } catch (err) {
+        setMsg(msgEl, err.message || '操作失败，请稍后重试。', false);
+      } finally {
+        saveBtn.disabled = false;
+        saveBtn.textContent = label;
+      }
+    });
+  };
+
+  const postJSON = (url, payload) => authFetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+
+  bindSecurePanel(profileEmailToggle, profileEmailEdit, $('#profile-email-save'), $('#profile-email-cancel'),
+    profileEmailMsg, [profileEmailValue, profileEmailPassword], async () => {
+      const email = profileEmailValue.value.trim();
+      if (!email) { setMsg(profileEmailMsg, '请填写新邮箱。', false); return false; }
+      applyUser(await postJSON('/api/auth/me/email', { email, password: profileEmailPassword.value }), true);
+      setMsg(profileEmailMsg, '邮箱已更新。');
+    });
+
+  bindSecurePanel(profilePhoneToggle, profilePhoneEdit, $('#profile-phone-save'), $('#profile-phone-cancel'),
+    profilePhoneMsg, [profilePhoneValue, profilePhonePassword], async () => {
+      const phone = profilePhoneValue.value.trim();
+      if (!phone) { setMsg(profilePhoneMsg, '请填写新手机号。', false); return false; }
+      applyUser(await postJSON('/api/auth/me/phone', { phone, password: profilePhonePassword.value }), true);
+      setMsg(profilePhoneMsg, '手机号已更新。');
+    });
+
+  bindSecurePanel(profilePwdToggle, profilePwdEdit, $('#profile-pwd-save'), $('#profile-pwd-cancel'),
+    profilePwdMsg, [profilePwdCurrent, profilePwdNew], async () => {
+      await postJSON('/api/auth/me/password', {
+        current_password: profilePwdCurrent.value,
+        new_password: profilePwdNew.value,
+      });
+      setMsg(profilePwdMsg, '密码已修改，其他设备的登录已失效。');
+    });
+
+  profileTabBasic.addEventListener('click', () => setProfileTab('basic'));
+  profileTabSecurity.addEventListener('click', () => setProfileTab('security'));
+
+  // 登出：撤销服务端会话 + 清本地态（网络异常也照样清，避免卡在「假登录」态）
+  const doLogout = async () => {
+    try { await fetch('/api/auth/logout', { method: 'POST' }); } catch (e) { /* 忽略：本地态照常清除 */ }
+    currentUser = null;
+    closeProfile();
+    renderAuthState();
+  };
+
+  navProfile.addEventListener('click', () => { openProfile(); });
+  $('#profile-close').addEventListener('click', closeProfile);
+  profileModal.addEventListener('click', (e) => { if (e.target === profileModal) closeProfile(); });
+  $('#profile-logout').addEventListener('click', doLogout);
+  navLogout.addEventListener('click', doLogout);
+
+  // Esc：优先关最上层的个人资料，其次关登录框
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    if (!profileModal.classList.contains('hidden')) closeProfile();
+    else if (!authModal.classList.contains('hidden')) closeAuth();
+  });
 
   /* ---------- 初始化 ---------- */
   checkHealth();

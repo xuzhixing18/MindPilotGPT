@@ -9,10 +9,13 @@ test_download.*
 e2e_download.*
 
 # 阶段0 内容缓存数据库（SQLite 及其 WAL/SHM 附属文件，切勿提交）
+# data/ 同时覆盖默认头像目录 data/avatars/
 data/
 *.db
 *.db-wal
 *.db-shm
+# 迁移重建表前的自动备份（DATABASE_URL 指向 data/ 之外时也不误提交）
+*.pre-migration.bak
 
 # IDE
 .idea/

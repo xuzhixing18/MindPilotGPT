@@ -6,11 +6,13 @@
 设计要点：
 - engine 在导入时按 ``DATABASE_URL`` 环境变量创建（默认 ``data/mindpilot.db``）；
 - sqlite 开启 WAL + check_same_thread=False，兼顾并发读与 FastAPI 线程池；
-- ``init_db()`` 幂等：建目录、注册表、create_all，返回是否成功（供 /api/health 展示）。
+- ``init_db()`` 幂等：建目录、注册表、create_all、**结构对齐**（见 storage.migrations），
+  返回是否成功（供 /api/health 展示）。
 """
 
 from __future__ import annotations
 
+import logging
 import os
 from contextlib import contextmanager
 from pathlib import Path
@@ -18,6 +20,8 @@ from typing import Iterator
 
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
+
+log = logging.getLogger(__name__)
 
 # 项目根目录（backend/storage/db.py → storage → backend → root）
 _ROOT = Path(__file__).resolve().parents[2]
@@ -73,7 +77,12 @@ def session() -> Iterator[Session]:
 
 
 def init_db() -> bool:
-    """创建数据目录与所有表（幂等）。成功返回 True，失败返回 False（不抛出，避免拖垮启动）。"""
+    """创建数据目录与所有表，并对齐既有表结构（幂等）。
+
+    成功返回 True，失败返回 False（不抛出，避免拖垮启动）。
+    ``create_all`` 只建缺失的表，因此额外调 ``migrations.ensure_schema()`` 给已存在的表
+    补列 / 放宽约束 / 补索引；该步失败只记日志，不改变本函数返回值（表已可用）。
+    """
     try:
         # 文件型 sqlite：确保父目录存在
         if _IS_SQLITE and ":memory:" not in DATABASE_URL:
@@ -84,6 +93,15 @@ def init_db() -> bool:
         from backend.storage import models  # noqa: F401
 
         Base.metadata.create_all(engine)
-        return True
     except Exception:
         return False
+
+    try:
+        from backend.storage import migrations
+
+        applied = migrations.ensure_schema()
+        if applied:
+            log.info("[migrations] 已对齐表结构：%s", "; ".join(applied))
+    except Exception as exc:
+        log.error("[migrations] 结构对齐失败（旧库可能缺列）：%s", exc)
+    return True

@@ -20,7 +20,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from fastapi import Body, FastAPI, HTTPException, Query
+from fastapi import Body, Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -34,7 +34,7 @@ _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from backend import ai, comments, downloader, storage, transcribe
+from backend import ai, auth, comments, downloader, storage, transcribe
 
 # 前端静态目录：项目根目录下的 frontend/
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
@@ -51,6 +51,18 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# 认证能力包：注册 /api/auth/* 路由与语义化异常处理器。
+# AUTH_ENABLED 默认 false——既有开放端点行为不变；auth 异常按 MRO 统一映射为 HTTP。
+app.add_exception_handler(auth.AuthError, auth.auth_error_handler)
+app.include_router(auth.router)
+
+# 业务端点统一门禁（/api/health 与 /api/auth/* 不在此列，保持开放以供前端探测与登录）：
+#   AUTH_ENABLED=false（默认）              → 完全放行，行为与改造前一致；
+#   AUTH_ENABLED=true + ALLOW_ANONYMOUS=true → 放行（匿名走免费额度）；
+#   AUTH_ENABLED=true + ALLOW_ANONYMOUS=false→ 未登录访问一律 401，前端据此弹登录框。
+# 依赖按请求缓存（use_cache 默认），多个端点复用同一 Depends 实例不会重复解析会话。
+_AUTH_GATE = Depends(auth.require_user_if_enabled)
 
 
 def _cleanup(path_str: str) -> None:
@@ -72,11 +84,17 @@ def health() -> dict:
         "asr": transcribe.asr_available(),
         "asr_provider": transcribe.asr_label(),
         "db": _DB_READY,
+        "auth": auth.auth_enabled(),
+        # 前端据此决定是否弹登录框拦截解析（与后端门禁同一判据）
+        "auth_required": auth.auth_required(),
     }
 
 
 @app.get("/api/info")
-def get_info(url: str = Query(..., min_length=1, description="视频链接")) -> JSONResponse:
+def get_info(
+    url: str = Query(..., min_length=1, description="视频链接"),
+    user: auth.CurrentUser = _AUTH_GATE,
+) -> JSONResponse:
     """解析视频信息。同步 def → 由 Starlette 线程池执行，避免阻塞事件循环。"""
     try:
         data = downloader.extract_info(url)
@@ -91,6 +109,7 @@ def get_info(url: str = Query(..., min_length=1, description="视频链接")) ->
 def post_download(
     url: str = Body(..., embed=True, min_length=1),
     format_id: str | None = Body(None, embed=True),
+    user: auth.CurrentUser = _AUTH_GATE,
 ) -> FileResponse:
     """服务端下载并流式回传文件（POST/JSON 形式）。"""
     return _download_response(url, format_id)
@@ -100,6 +119,7 @@ def post_download(
 def get_download(
     url: str = Query(..., min_length=1),
     format_id: str | None = Query(None),
+    user: auth.CurrentUser = _AUTH_GATE,
 ) -> FileResponse:
     """服务端下载并流式回传文件（GET 形式）。
 
@@ -130,6 +150,7 @@ def _download_response(url: str, format_id: str | None) -> FileResponse:
 def post_transcribe(
     url: str = Body(..., embed=True, min_length=1),
     refresh: bool = Body(False, embed=True),
+    user: auth.CurrentUser = _AUTH_GATE,
 ) -> JSONResponse:
     """提取视频字幕（转写）。同步 def → 由 Starlette 线程池执行，避免阻塞事件循环。"""
     try:
@@ -145,6 +166,7 @@ def post_transcribe(
 def post_summarize(
     url: str = Body(..., embed=True, min_length=1),
     refresh: bool = Body(False, embed=True),
+    user: auth.CurrentUser = _AUTH_GATE,
 ) -> JSONResponse:
     """一站式：提取字幕 → 调用大模型生成结构化总结（摘要/要点/章节）。"""
     try:
@@ -181,6 +203,7 @@ def post_summarize(
 def post_mindmap(
     url: str = Body(..., embed=True, min_length=1),
     refresh: bool = Body(False, embed=True),
+    user: auth.CurrentUser = _AUTH_GATE,
 ) -> JSONResponse:
     """一站式：提取字幕 → 调用大模型生成层级思维导图（带缓存）。"""
     try:
@@ -212,6 +235,7 @@ def post_qa(
     url: str = Body(..., embed=True, min_length=1),
     question: str = Body(..., embed=True, min_length=1),
     history: list[dict] | None = Body(None, embed=True),
+    user: auth.CurrentUser = _AUTH_GATE,
 ) -> JSONResponse:
     """一站式：提取字幕 → 基于字幕内容回答一个问题（支持多轮上下文）。"""
     try:
@@ -238,6 +262,7 @@ def post_comments(
     url: str = Body(..., embed=True, min_length=1),
     refresh: bool = Body(False, embed=True),
     limit: int = Body(20, embed=True, ge=1, le=50),
+    user: auth.CurrentUser = _AUTH_GATE,
 ) -> JSONResponse:
     """抓取视频高赞评论（无大模型）。同步 def → 线程池执行，避免阻塞事件循环。
 

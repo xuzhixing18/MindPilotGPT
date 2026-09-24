@@ -9,7 +9,7 @@
 
 from __future__ import annotations
 
-from backend.storage import repo
+from backend.storage import migrations, repo
 from backend.storage.db import Base, init_db, session
 from backend.storage.keys import comments_key, mindmap_key, normalize_url, summary_key, transcript_key
 from backend.storage.singleflight import SingleFlight
@@ -25,6 +25,7 @@ __all__ = [
     "init_db",
     "session",
     "repo",
+    "migrations",
     "normalize_url",
     "transcript_key",
     "summary_key",
