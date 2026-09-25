@@ -24,6 +24,7 @@ from typing import Any
 
 from backend.auth import avatar, identifiers, security, store
 from backend.auth.config import load_settings
+from backend.ai import config as ai_config
 from backend.auth.errors import (
     AccountDisabledError,
     AccountLockedError,
@@ -372,6 +373,42 @@ def set_avatar(user_id: str, data: bytes) -> dict[str, Any]:
     _require_user(user_id)
     url, _mime = avatar.save_avatar(user_id, data)
     return store.public_user(store.update_user_fields(user_id, avatar_url=url) or {})
+
+
+def _model_selectable(provider: str, model: str) -> bool:
+    """(provider, model) 是否在 ai_models 目录内且已上架（阶段3 DB 化目录）。
+
+    目录读不到（DB 故障）时放行：目录不可用不应锁死用户保存设置——
+    运行期由 ai_override_cfg 再兜底（未配 Key 回退全局默认）。
+    """
+    try:
+        from backend.ai import catalog as ai_catalog
+        return ai_catalog.is_selectable(provider, model)
+    except Exception:
+        return True
+
+
+def update_ai_settings(user_id: str, provider: str | None, model: str | None) -> dict[str, Any]:
+    """设置 / 清除「一键 AI 分析」默认模型（provider 与 model 必须同设同清）。
+
+    provider 必须是 ai.config.PROVIDERS 的预设键（平台 Key 池范围，不允许自定义端点）；
+    model 必须是 ai_models 目录内且已上架的条目（阶段3 起目录由管理端在线维护，
+    下架即不可选），最终仍按预设服务商的固定 base_url 调用——无新增 SSRF 面。
+    """
+    _require_user(user_id)
+    if (provider is None) != (model is None):
+        raise ValidationError("服务商与模型必须同时设置或同时清空。")
+    model_value: str | None = None
+    if provider is not None:
+        if provider not in ai_config.PROVIDERS:
+            raise ValidationError("不支持的服务商。")
+        model_value = (model or "").strip()
+        if not model_value or len(model_value) > 128:
+            raise ValidationError("模型标识不正确。")
+        if not _model_selectable(provider, model_value):
+            raise ValidationError("该模型已下架或不在可选目录中。")
+    updated = store.update_user_fields(user_id, ai_provider=provider, ai_model=model_value)
+    return store.public_user(updated or {})
 
 
 def remove_avatar(user_id: str) -> dict[str, Any]:

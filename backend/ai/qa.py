@@ -17,6 +17,7 @@ from typing import Any
 
 from backend.ai import config as ai_config
 from backend.ai import llm
+from backend.ai.config import LLMConfig
 from backend.ai.summary import AINotConfiguredError  # 复用「未配置大模型」语义化异常
 
 # 喂给 LLM 的字幕上下文上限：需为历史对话与问题留出空间，故略小于总结/思维导图
@@ -69,6 +70,7 @@ def ask(
     question: str = "",
     *,
     history: list[dict[str, str]] | None = None,
+    cfg: LLMConfig | None = None,
 ) -> dict[str, Any]:
     """基于字幕内容回答一个问题（支持多轮上下文）。
 
@@ -76,6 +78,7 @@ def ask(
     :param title: 视频标题（辅助模型理解上下文）
     :param question: 用户本轮问题
     :param history: 之前若干轮对话 [{role: user|assistant, content: str}]，可空
+    :param cfg: 调用方解析好的 LLM 配置（用户默认模型覆盖）；None 时走全局 env 配置
     :raises AINotConfiguredError: 未配置大模型
     :raises QAError: 字幕/问题为空、调用失败或返回空
     :return: {answer, model, question}
@@ -86,7 +89,7 @@ def ask(
     if not question:
         raise QAError("问题为空。")
 
-    cfg = ai_config.load_config()
+    cfg = cfg if cfg is not None else ai_config.load_config()
     if cfg is None:
         raise AINotConfiguredError(
             "尚未配置大模型（缺少 AI_PROVIDER / API Key），无法进行 AI 问答。"

@@ -17,10 +17,11 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
-from fastapi import Body, Depends, FastAPI, HTTPException, Query
+from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -93,6 +94,95 @@ def health() -> dict:
         # 前端据此决定是否弹登录框拦截解析（与后端门禁同一判据）
         "auth_required": auth.auth_required(),
     }
+
+
+@app.get("/api/ai/models")
+def get_ai_models(user: auth.CurrentUser = Depends(auth.get_current_user)) -> JSONResponse:
+    """「选择模型」弹窗数据：模型目录 + 各服务商可用性 + 全局默认 + 当前选择。
+
+    目录来自 ai_models 表（阶段3 DB 化，管理端在线维护），仅含已上架条目。
+    开放访问：目录与可用性布尔值不含任何密钥，匿名用户也能渲染弹窗
+    （保存时才要求登录）。current 仅在登录且已设置时返回。
+    """
+    current = (user.ai_provider, user.ai_model) if user.is_authenticated and user.ai_provider else None
+    return JSONResponse(ai.models_payload(current))
+
+
+def _require_admin(request: Request) -> None:
+    """管理端点门禁：ADMIN_API_TOKEN（Bearer 或 X-Admin-Token）。
+
+    未配置令牌时返回 503（明确「未开放」而非裸 401，避免误以为令牌错误）；
+    令牌错误统一 401。运营轮次接入管理后台账号体系后可换成角色依赖。
+    """
+    token = (os.getenv("ADMIN_API_TOKEN") or "").strip()
+    if not token:
+        raise HTTPException(status_code=503, detail="未配置 ADMIN_API_TOKEN，管理接口未开放。")
+    auth_header = request.headers.get("authorization", "")
+    if auth_header == f"Bearer {token}" or request.headers.get("x-admin-token", "") == token:
+        return
+    raise HTTPException(status_code=401, detail="管理令牌不正确。")
+
+
+@app.get("/api/admin/ai/models")
+def admin_list_ai_models(_: None = Depends(_require_admin)) -> JSONResponse:
+    """目录全量列表（管理端用，含已下架条目与计费倍率）。"""
+    return JSONResponse({"models": ai.catalog.list_all()})
+
+
+@app.post("/api/admin/ai/models", status_code=201)
+def admin_create_ai_model(
+    body: dict = Body(...),
+    _: None = Depends(_require_admin),
+) -> JSONResponse:
+    """新增目录条目（上下架新模型无需发版）。"""
+    try:
+        row = ai.catalog.create_model(
+            provider=body.get("provider") or "",
+            model=body.get("model") or "",
+            label=body.get("label") or "",
+            tier=body.get("tier") or "$",
+            price_multiplier=body.get("price_multiplier", 1.0),
+            enabled=body.get("enabled", True),
+            sort_order=body.get("sort_order", 0),
+        )
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return JSONResponse({"model": row}, status_code=201)
+
+
+@app.patch("/api/admin/ai/models/{model_id}")
+def admin_update_ai_model(
+    model_id: str,
+    body: dict = Body(...),
+    _: None = Depends(_require_admin),
+) -> JSONResponse:
+    """更新运营属性（label/tier/price_multiplier/enabled/sort_order）。
+
+    下架传 {"enabled": false}：已存该模型的用户运行时自动回退全局默认。
+    """
+    try:
+        row = ai.catalog.update_model(model_id, **body)
+    except ai.catalog.CatalogNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return JSONResponse({"model": row})
+
+
+@app.delete("/api/admin/ai/models/{model_id}")
+def admin_delete_ai_model(model_id: str, _: None = Depends(_require_admin)) -> JSONResponse:
+    """删除目录条目（历史引用不受影响，运行时同样自动回退）。"""
+    try:
+        row = ai.catalog.delete_model(model_id)
+    except ai.catalog.CatalogNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return JSONResponse({"model": row})
+
+
+@app.post("/api/admin/ai/models/reseed")
+def admin_reseed_ai_models(_: None = Depends(_require_admin)) -> JSONResponse:
+    """重跑出厂种子导入（幂等，只补缺不覆盖管理员改动）。"""
+    return JSONResponse({"inserted": ai.catalog.ensure_seeded()})
 
 
 @app.get("/api/info")
@@ -201,7 +291,8 @@ def post_summarize(
         raise HTTPException(status_code=500, detail=f"转写出错：{exc}") from exc
 
     try:
-        summary = ai.summarize(tr["text"], tr.get("title", ""), refresh=refresh)
+        cfg = auth.ai_override_cfg(user)
+        summary = ai.summarize(tr["text"], tr.get("title", ""), refresh=refresh, cfg=cfg)
     except ai.AINotConfiguredError as exc:
         # 未配置大模型：503 + 友好提示（前端据此引导配置，而非报“服务器错误”）
         raise HTTPException(status_code=503, detail=str(exc)) from exc
@@ -243,7 +334,8 @@ def post_mindmap(
         raise HTTPException(status_code=500, detail=f"转写出错：{exc}") from exc
 
     try:
-        mindmap = ai.build_mindmap(tr["text"], tr.get("title", ""), refresh=refresh)
+        cfg = auth.ai_override_cfg(user)
+        mindmap = ai.build_mindmap(tr["text"], tr.get("title", ""), refresh=refresh, cfg=cfg)
     except ai.AINotConfiguredError as exc:
         # 未配置大模型：503 + 友好提示（前端据此引导配置，而非报“服务器错误”）
         raise HTTPException(status_code=503, detail=str(exc)) from exc
@@ -295,6 +387,7 @@ def post_qa(
                 tr["text"],
                 question,
                 fallback_history=history,
+                cfg=auth.ai_override_cfg(user),
             )
         except library.LibraryError:
             raise  # 语义化异常（如会话不属于本人）交应用级处理器映射 404

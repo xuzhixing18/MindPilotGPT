@@ -18,6 +18,7 @@ from typing import Any
 from backend import storage  # 思维导图缓存 + 并发去重（阶段0：SQLite）
 from backend.ai import config as ai_config
 from backend.ai import llm
+from backend.ai.config import LLMConfig
 from backend.ai.summary import AINotConfiguredError  # 复用「未配置大模型」语义化异常
 
 # 单次喂给 LLM 的文本上限（与总结一致，覆盖绝大多数视频）
@@ -135,7 +136,9 @@ def _normalize_node(node: Any, depth: int = 0) -> dict[str, Any] | None:
     return {"title": title, "children": children}
 
 
-def build_mindmap(text: str, title: str = "", *, refresh: bool = False) -> dict[str, Any]:
+def build_mindmap(
+    text: str, title: str = "", *, refresh: bool = False, cfg: LLMConfig | None = None
+) -> dict[str, Any]:
     """对字幕文本生成层级思维导图（带缓存）。
 
     缓存键 = sha256(文本 + 模型 + PROMPT_VERSION)，跨 URL 复用；命中直接返回
@@ -144,6 +147,7 @@ def build_mindmap(text: str, title: str = "", *, refresh: bool = False) -> dict[
     :param text: 字幕全文
     :param title: 视频标题（辅助模型理解上下文，并作为根主题兜底）
     :param refresh: 为 True 时跳过缓存、强制重算并覆盖
+    :param cfg: 调用方解析好的 LLM 配置（用户默认模型覆盖）；None 时走全局 env 配置
     :raises AINotConfiguredError: 未配置大模型
     :raises MindmapError: 字幕为空、调用失败或解析失败
     :return: {title, children, model, truncated, cached}
@@ -151,7 +155,7 @@ def build_mindmap(text: str, title: str = "", *, refresh: bool = False) -> dict[
     if not text or not text.strip():
         raise MindmapError("字幕文本为空，无法生成思维导图。")
 
-    cfg = ai_config.load_config()
+    cfg = cfg if cfg is not None else ai_config.load_config()
     if cfg is None:
         raise AINotConfiguredError(
             "尚未配置大模型（缺少 AI_PROVIDER / API Key），无法生成思维导图。"

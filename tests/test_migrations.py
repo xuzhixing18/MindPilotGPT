@@ -50,6 +50,7 @@ CREATE UNIQUE INDEX ix_users_email ON users (email);
 
 _NEW_COLUMNS = {
     "phone", "avatar_url", "bio", "gender", "birthday", "location", "website", "phone_verified",
+    "ai_provider", "ai_model",
 }
 
 

@@ -78,6 +78,7 @@ export const state = {
   authEnabled: false,   // 是否提供登录能力（决定登录入口显隐）
   authRequired: false,  // 业务端点是否强制登录（与后端门禁同一判据）
   currentUser: null,    // 已登录用户完整资料（/api/auth/me 回传）或 null
+  aiModels: null,      // GET /api/ai/models 回传的目录与当前选择（model-picker 缓存）
 };
 
 // 会话级缓存与并发去重：同一 url 重复点击秒回、并发点击只发一次请求
@@ -215,6 +216,35 @@ async function meFetch(path, { method = 'GET', body } = {}) {
   }
   return data;
 }
+
+/* ---------- AI 模型选择（一键分析默认模型） ----------
+ * 目录拉取开放访问（无密钥信息）；保存走 PATCH /api/auth/me/ai-settings（需登录），
+ * provider/model 同设同清，null/null = 恢复跟随平台默认。失败抛带 status 的 Error。
+ */
+export const ai = {
+  models: () => getJson('/api/ai/models'),
+  saveSettings: (provider, model) => authFetch('/api/auth/me/ai-settings', {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ provider, model }),
+  }),
+};
+
+// 把 (provider, model) 翻译为展示名「服务商 · 模型」：优先读 /api/ai/models
+// 目录的 label（后端已在未指定时回退模型 ID 的大写）；目录未加载时同样
+// 回退大写 ID，保证任何路径下未指定展示名的模型都以大写呈现。
+export const modelDisplayName = (provider, model) => {
+  const data = state.aiModels;
+  if (data) {
+    for (const p of data.providers || []) {
+      if (p.key !== provider) continue;
+      if (!model) return `${p.label} · 默认`;
+      const m = (p.models || []).find((x) => x.id === model);
+      return m ? `${p.label} · ${m.label}` : `${p.label} · ${String(model).toUpperCase()}`;
+    }
+  }
+  return provider ? `${provider} · ${(model || '默认').toUpperCase()}` : '';
+};
 
 /* ---------- 字幕导出（纯前端 Blob 下载 SRT / TXT） ---------- */
 const srtTime = (sec) => {

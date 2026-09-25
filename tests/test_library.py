@@ -273,8 +273,8 @@ class _AskStub:
     def __init__(self):
         self.calls = []
 
-    def __call__(self, text, title="", question="", *, history=None):
-        self.calls.append({"text": text, "title": title, "question": question, "history": history})
+    def __call__(self, text, title="", question="", *, history=None, cfg=None):
+        self.calls.append({"text": text, "title": title, "question": question, "history": history, "cfg": cfg})
         return {"answer": f"答：{question}", "model": "stub", "question": question}
 
 

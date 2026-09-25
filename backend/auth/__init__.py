@@ -32,6 +32,7 @@ from backend.auth.config import auth_enabled, auth_required, load_settings
 from backend.auth.dependencies import (
     ANONYMOUS,
     CurrentUser,
+    ai_override_cfg,
     client_ip,
     get_current_user,
     require_user,
@@ -71,6 +72,7 @@ __all__ = [
     "get_current_user",
     "require_user",
     "require_user_if_enabled",
+    "ai_override_cfg",
     "CurrentUser",
     "ANONYMOUS",
     "client_ip",

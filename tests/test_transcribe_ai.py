@@ -34,6 +34,10 @@ _AI_ENV_KEYS = (
     "DASHSCOPE_API_KEY", "QWEN_API_KEY",
     "MOONSHOT_API_KEY", "KIMI_API_KEY",
     "OPENAI_API_KEY",
+    # 各家专属端点/默认模型：从 PROVIDERS 派生，确保真实 .env 的 KIMI_BASE_URL /
+    # QWEN_MODEL_ID 等不泄漏进用例（否则端点/默认模型断言会随本机 .env 漂移）
+    *(k for preset in ai_config.PROVIDERS.values()
+      for k in (*preset.get("base_url_envs", ()), *preset.get("model_envs", ()))),
 )
 
 
@@ -71,7 +75,7 @@ def test_config_providers():
     cfg = ai_config.load_config()
     assert cfg is not None and cfg.provider == "deepseek"
     assert cfg.base_url == "https://api.deepseek.com/v1"
-    assert cfg.model == "deepseek-chat"
+    assert cfg.model == "deepseek-v4-pro"
     assert ai_config.ai_available() is True
 
     # 智谱 + 专属 Key 变量名
@@ -79,7 +83,7 @@ def test_config_providers():
     os.environ.pop("AI_API_KEY")
     os.environ["ZHIPU_API_KEY"] = "z-test"
     cfg = ai_config.load_config()
-    assert cfg.model == "glm-4-flash" and cfg.api_key == "z-test"
+    assert cfg.model == "glm-5.3-flash" and cfg.api_key == "z-test"
 
     # 覆盖默认模型
     os.environ["AI_MODEL"] = "glm-4-plus"
@@ -108,7 +112,7 @@ def test_config_aliases():
     os.environ["GLM_API_KEY"] = "g-test"
     cfg = ai_config.load_config()
     assert cfg is not None and cfg.provider == "zhipu"
-    assert cfg.api_key == "g-test" and cfg.model == "glm-4-flash"
+    assert cfg.api_key == "g-test" and cfg.model == "glm-5.3-flash"
 
     # 旧命名 LLM_* 兼容：LLM_MODEL_ID + LLM_API_KEY
     _clear_ai_env()
@@ -134,14 +138,54 @@ def test_config_aliases():
     assert cfg.model == "kimi-k3" and cfg.api_key == "k3-test"
     assert cfg.base_url == "https://api.moonshot.cn/v1"
 
-    # gpt-4o 前缀 -> openai + model 覆盖
+    # openai 预设已停用：gpt- 前缀仍解析为 openai，但需显式端点+Key（走自定义端点分支）
     _clear_ai_env()
     os.environ["AI_PROVIDER"] = "gpt-4o"
-    os.environ["OPENAI_API_KEY"] = "o-test"
+    os.environ["AI_BASE_URL"] = "https://api.openai.com/v1"
+    os.environ["AI_API_KEY"] = "o-test"
     cfg = ai_config.load_config()
     assert cfg.provider == "openai" and cfg.model == "gpt-4o"
+    assert cfg.base_url == "https://api.openai.com/v1"
     _clear_ai_env()
     print("[config] aliases & LLM_* compat & model-id prefix ok")
+
+
+def test_config_per_provider_endpoint():
+    """回归：按服务商专属 BASE_URL / MODEL_ID 必须生效（修复 kimi 401）。
+
+    历史 bug：代码只读全局 AI_BASE_URL/LLM_BASE_URL，忽略 KIMI_BASE_URL 等专属变量，
+    导致代理 Key 被发到官方端点 → 401 Incorrect API key。此处锁定专属端点/模型/Key 优先级。
+    """
+    # 覆盖路径（用户选定 kimi）：专属 BASE_URL 指向代理 → 必须原样采用，而非官方预设
+    _clear_ai_env()
+    os.environ["KIMI_API_KEY"] = "sk-proxy-kimi"
+    os.environ["KIMI_BASE_URL"] = "https://proxy.example.com/api/v1"
+    cfg = ai_config.load_config(provider="kimi", model="kimi-k2.6")
+    assert cfg is not None and cfg.provider == "kimi"
+    assert cfg.base_url == "https://proxy.example.com/api/v1"
+    assert cfg.api_key == "sk-proxy-kimi" and cfg.model == "kimi-k2.6"
+
+    # 覆盖路径：未显式给 model 时，专属 KIMI_MODEL_ID 作为该服务商默认模型
+    os.environ["KIMI_MODEL_ID"] = "kimi-k3"
+    assert ai_config.load_config(provider="kimi").model == "kimi-k3"
+
+    # 覆盖路径 Key 优先级：用户选了 kimi → 专属 KIMI_API_KEY 优先于全局 AI_API_KEY
+    os.environ["AI_API_KEY"] = "generic-should-lose"
+    assert ai_config.load_config(provider="kimi", model="kimi-k2.6").api_key == "sk-proxy-kimi"
+
+    # 全局路径（未登录/未选）：AI_PROVIDER=kimi 也应采用专属 KIMI_BASE_URL
+    _clear_ai_env()
+    os.environ["AI_PROVIDER"] = "kimi"
+    os.environ["KIMI_API_KEY"] = "sk-k"
+    os.environ["KIMI_BASE_URL"] = "https://proxy.example.com/api/v1"
+    assert ai_config.load_config().base_url == "https://proxy.example.com/api/v1"
+
+    # 专属 BASE_URL 缺省时回退官方预设（不影响未配代理的服务商）
+    _clear_ai_env()
+    os.environ["KIMI_API_KEY"] = "sk-k"
+    assert ai_config.load_config(provider="kimi").base_url == "https://api.moonshot.cn/v1"
+    _clear_ai_env()
+    print("[config] per-provider base_url/model/key priority ok（kimi 401 回归）")
 
 
 def test_extract_json():
@@ -359,6 +403,7 @@ if __name__ == "__main__":
     test_config_no_key()
     test_config_providers()
     test_config_aliases()
+    test_config_per_provider_endpoint()
     test_extract_json()
     test_normalize()
     test_summarize_no_key()

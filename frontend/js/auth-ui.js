@@ -5,7 +5,7 @@
  * 401 的统一处理由本模块注册到 core（setUnauthorizedHandler），core 只触发不反向依赖。
  */
 import {
-  $, state, authFetch, bus,
+  $, state, authFetch, bus, modelDisplayName,
   setUnauthorizedHandler,
 } from './core.js';
 
@@ -16,6 +16,7 @@ let authNicknameWrap, authNickname, authHint, authPassword, authPasswordLabel;
 let authRememberWrap, authRemember, authError, authSubmit;
 let navLogin, navRegister, navProfile, navLogout;
 let navUser, navUserName, navAvatarImg, navAvatarIcon;
+let navModel, navModelName;
 
 const AUTH_TAB_ON = 'auth-tab flex-1 rounded-full bg-white py-1.5 font-semibold text-brand-600 shadow-sm';
 const AUTH_TAB_OFF = 'auth-tab flex-1 rounded-full py-1.5 font-semibold text-slate-500 transition hover:text-slate-800';
@@ -78,6 +79,15 @@ export const renderAuthState = () => {
     const u = state.currentUser || {};
     if (navUserName) navUserName.textContent = u.nickname || u.email || u.phone || '';
     if (navAvatarImg && navAvatarIcon) renderAvatar(navAvatarImg, navAvatarIcon, u.avatar_url);
+  }
+  // 「默认模型」按钮：已登录时展示当前选择（服务商 · 模型；展示名同选择弹窗）
+  if (navModel) {
+    const u = state.currentUser || {};
+    if (navModelName) {
+      navModelName.textContent = logged && u.ai_provider
+        ? modelDisplayName(u.ai_provider, u.ai_model || null)
+        : '跟随平台默认';
+    }
   }
   bus.emit('auth:render-nav', { logged });   // 预留：其他模块可据此调整导航
 };
@@ -530,6 +540,7 @@ export const initAuthUI = () => {
   navProfile = $('#nav-profile'); navLogout = $('#nav-logout');
   navUser = $('#nav-user'); navUserName = $('#nav-user-name');
   navAvatarImg = $('#nav-avatar-img'); navAvatarIcon = $('#nav-avatar-icon');
+  navModel = $('#nav-model'); navModelName = $('#nav-model-name');
 
   // 个人中心
   profileModal = $('#profile-modal');
@@ -557,6 +568,9 @@ export const initAuthUI = () => {
 
   bindAuthForm();
   bindProfile();
+
+  // 默认模型设置变更（model-picker 保存后广播）→ 刷新按钮上的当前模型名
+  bus.on('ai-settings:changed', () => renderAuthState());
 
   // 注册 401 统一处理：清态已由 core.markUnauthorized 完成，这里补渲染 + 弹登录框
   setUnauthorizedHandler(() => {

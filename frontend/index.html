@@ -97,6 +97,12 @@
               </span>
               <span id="nav-user-name" class="hidden max-w-[10rem] truncate text-sm font-semibold text-slate-700 sm:block"></span>
             </button>
+            <!-- 默认模型：一键 AI 分析调用的模型（弹窗由 model-picker.js 提供，文字由 auth-ui.js 更新） -->
+            <button id="nav-model" type="button" title="设置一键 AI 分析默认模型"
+              class="flex items-center gap-1.5 rounded-full border border-slate-200 px-3 py-1.5 text-sm text-slate-600 transition hover:border-brand-300 hover:text-brand-600">
+              <svg viewBox="0 0 24 24" class="h-3.5 w-3.5 text-brand-500" fill="currentColor"><path d="M12 3l1.9 4.6L18.5 9.5l-4.6 1.9L12 16l-1.9-4.6L5.5 9.5l4.6-1.9L12 3z"/></svg>
+              <span id="nav-model-name" class="max-w-[9rem] truncate font-medium">使用默认模型</span>
+            </button>
             <button id="nav-logout" type="button"
               class="rounded-full border border-slate-200 px-3 py-1.5 text-sm text-slate-600 transition hover:border-brand-300 hover:text-brand-600">
               退出

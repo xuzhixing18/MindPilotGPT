@@ -31,13 +31,14 @@ os.environ["DATABASE_URL"] = f"sqlite:///{(_TMP_DIR / 'test_mm_qa.db').as_posix(
 os.environ["CACHE_ENABLED"] = "true"
 
 from backend import storage  # noqa: E402
+from backend.ai import config as ai_config  # noqa: E402
 from backend.ai import llm as llm_mod  # noqa: E402
 from backend.ai import mindmap as ai_mindmap  # noqa: E402
 from backend.ai import qa as ai_qa  # noqa: E402
 from backend.storage import db as sdb  # noqa: E402
 from backend.storage import keys, repo  # noqa: E402
 
-# deepseek 预设：label=DeepSeek、model=deepseek-chat，model_label 即下面这个串
+# _set_fake_llm 钉住 AI_MODEL=deepseek-chat，故 model_label（label · model）恒为下面这个串
 _MODEL_LABEL = "DeepSeek · deepseek-chat"
 
 _AI_ENV_KEYS = (
@@ -48,6 +49,9 @@ _AI_ENV_KEYS = (
     "DASHSCOPE_API_KEY", "QWEN_API_KEY",
     "MOONSHOT_API_KEY", "KIMI_API_KEY",
     "OPENAI_API_KEY",
+    # 各家专属端点/默认模型：从 PROVIDERS 派生，隔离真实 .env（本文件另钉住 AI_MODEL）
+    *(k for preset in ai_config.PROVIDERS.values()
+      for k in (*preset.get("base_url_envs", ()), *preset.get("model_envs", ()))),
 )
 
 
@@ -57,10 +61,15 @@ def _clear_ai_env():
 
 
 def _set_fake_llm():
-    """配置一个假的 deepseek，使 load_config() 返回非 None（label/model 见 _MODEL_LABEL）。"""
+    """配置一个假的 deepseek，使 load_config() 返回非 None（label/model 见 _MODEL_LABEL）。
+
+    显式钉住 AI_MODEL=deepseek-chat：model_label 由「label · model」组成，钉住模型可令
+    _MODEL_LABEL 恒定，不随 config 预设默认模型（如 deepseek-v4-pro）变更而漂移。
+    """
     _clear_ai_env()
     os.environ["AI_PROVIDER"] = "deepseek"
     os.environ["AI_API_KEY"] = "sk-test"
+    os.environ["AI_MODEL"] = "deepseek-chat"
 
 
 def _patch_chat(fn):

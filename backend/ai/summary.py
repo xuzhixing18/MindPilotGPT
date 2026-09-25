@@ -15,6 +15,7 @@ from typing import Any
 
 from backend.ai import config as ai_config
 from backend.ai import llm
+from backend.ai.config import LLMConfig
 from backend import storage  # 总结缓存 + 并发去重（阶段0：SQLite）
 
 # 单次喂给 LLM 的文本上限（主流模型上下文的安全区间，覆盖绝大多数视频）
@@ -115,7 +116,9 @@ def _normalize(data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def summarize(text: str, title: str = "", *, refresh: bool = False) -> dict[str, Any]:
+def summarize(
+    text: str, title: str = "", *, refresh: bool = False, cfg: LLMConfig | None = None
+) -> dict[str, Any]:
     """对字幕文本生成结构化总结（带缓存）。
 
     缓存键 = sha256(文本 + 模型 + PROMPT_VERSION)，跨 URL 复用；命中直接返回
@@ -124,13 +127,15 @@ def summarize(text: str, title: str = "", *, refresh: bool = False) -> dict[str,
     :param text: 字幕全文
     :param title: 视频标题（辅助模型理解上下文）
     :param refresh: 为 True 时跳过缓存、强制重算并覆盖
+    :param cfg: 覆盖 LLM 配置（用户默认模型）；None=按全局 env 解析（匿名/兼容路径）
+    :param cfg: 调用方解析好的 LLM 配置（用户默认模型覆盖）；None 时走全局 env 配置
     :raises AINotConfiguredError: 未配置大模型
     :raises SummarizeError: 字幕为空、调用失败或解析失败
     """
     if not text or not text.strip():
         raise SummarizeError("字幕文本为空，无法总结。")
 
-    cfg = ai_config.load_config()
+    cfg = cfg if cfg is not None else ai_config.load_config()
     if cfg is None:
         raise AINotConfiguredError(
             "尚未配置大模型（缺少 AI_PROVIDER / API Key），无法生成 AI 总结。"

@@ -31,6 +31,34 @@ def _is_sampling_param_error(status: int, text: str) -> bool:
     return any(hint in low for hint in _SAMPLING_PARAM_HINTS)
 
 
+def _mask_key(headers: dict[str, str]) -> str:
+    """从 Authorization 头提取 Key 尾 4 位（脱敏），便于确认实际用了哪把 Key。"""
+    auth = headers.get("Authorization", "")
+    token = auth[7:].strip() if auth.lower().startswith("bearer ") else auth.strip()
+    return f"***{token[-4:]}" if len(token) >= 4 else "***"
+
+
+def _auth_hint(status: int, endpoint: str, headers: dict[str, str], payload: dict[str, Any]) -> str:
+    """4xx 时附加「端点+模型+Key尾」诊断，帮助定位 BASE_URL / 模型 / Key 是否匹配。
+
+    - 401/403：多为 Key 与端点不匹配（代理 Key 发到官方端点，或反之）。
+    - 404    ：多为端点路径或模型名在该服务上不存在（BASE_URL 路径段不对，或模型 id
+               非该端点提供）。
+    """
+    ctx = f"端点={endpoint}｜模型={payload.get('model', '?')}｜Key={_mask_key(headers)}"
+    if status in (401, 403):
+        return (
+            f"（鉴权失败｜{ctx}）请核对该服务商 BASE_URL 与 API Key 是否匹配：模型名为代理"
+            "自定义名时，BASE_URL 必须指向同一代理端点，否则 Key 会被官方端点判为无效。"
+        )
+    if status == 404:
+        return (
+            f"（未找到｜{ctx}）404 多为「端点路径」或「模型名」在该服务上不存在：请核对 "
+            "BASE_URL 路径段（如 /v1 与 /api/v1 之别）及模型 id 是否为该端点实际提供的名称。"
+        )
+    return ""
+
+
 def _post(endpoint: str, headers: dict[str, str], payload: dict[str, Any], timeout: float) -> Any:
     """POST 请求；对采样参数不兼容自动降级重试，成功时返回响应 JSON。"""
     try:
@@ -53,10 +81,11 @@ def _post(endpoint: str, headers: dict[str, str], payload: dict[str, Any], timeo
                 return resp2.json()
             except httpx.HTTPStatusError as exc2:
                 detail2 = (exc2.response.text or "")[:300]
-                raise LLMError(f"大模型接口返回 {exc2.response.status_code}：{detail2}") from exc2
+                hint2 = _auth_hint(exc2.response.status_code, endpoint, headers, retry_payload)
+                raise LLMError(f"大模型接口返回 {exc2.response.status_code}：{detail2}{hint2}") from exc2
             except httpx.HTTPError as exc2:
                 raise LLMError(f"调用大模型失败（网络异常）：{exc2}") from exc2
-        raise LLMError(f"大模型接口返回 {status}：{text[:300]}") from exc
+        raise LLMError(f"大模型接口返回 {status}：{text[:300]}{_auth_hint(status, endpoint, headers, payload)}") from exc
     except httpx.HTTPError as exc:
         raise LLMError(f"调用大模型失败（网络异常）：{exc}") from exc
 

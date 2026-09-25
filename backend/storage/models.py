@@ -13,7 +13,9 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 from typing import Any
 
-from sqlalchemy import JSON, Boolean, Date, DateTime, Index, Integer, String, Text, UniqueConstraint, false
+from sqlalchemy import (
+    JSON, Boolean, Date, DateTime, Float, Index, Integer, String, Text, UniqueConstraint, false, true,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from backend.storage.db import Base
@@ -134,6 +136,47 @@ class VideoInfo(Base):
     )
 
 
+class AIModel(Base):
+    """AI 模型目录（阶段3 DB 化）：「选择模型」货架的持久化数据源。
+
+    目录不再硬编码于 ai.config.MODEL_CATALOG——该常量降级为「出厂种子」，首次
+    访问时导入本表（幂等，只补缺不覆盖管理员改动）。运营可经管理端点在线
+    上下架 / 改展示名 / 调计费倍率，无需发版；用户侧校验与弹窗渲染均读本表
+    （进程内缓存见 ai.catalog）。
+
+    ``price_multiplier`` 为套餐/用量计费联动的预留位：阶段1 仅展示 tier 档位，
+    接入 usage_counters 后按 (token 用量 × 倍率) 计量。
+    """
+
+    __tablename__ = "ai_models"
+    __table_args__ = (
+        UniqueConstraint("provider", "model", name="uq_ai_models_provider_model"),
+        Index("ix_ai_models_provider_sort", "provider", "sort_order"),
+        {"comment": "AI 模型目录（管理端可增删改，出厂种子见 ai.config.MODEL_CATALOG）"},
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, comment="uuid4 hex")
+    provider: Mapped[str] = mapped_column(String(32), comment="服务商键（config.PROVIDERS 预设键）")
+    model: Mapped[str] = mapped_column(String(128), comment="API 模型标识（LLM 请求体的 model 字段）")
+    label: Mapped[str] = mapped_column(String(64), default="", server_default="", comment="弹窗展示名")
+    tier: Mapped[str] = mapped_column(
+        String(8), default="$", server_default="$", comment="价格档位徽标：$ / $$",
+    )
+    price_multiplier: Mapped[float] = mapped_column(
+        Float, default=1.0, server_default="1.0", comment="计费倍率（套餐/用量计费联动预留）",
+    )
+    enabled: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=true(), comment="是否上架可选（false=隐藏但保留历史引用）",
+    )
+    sort_order: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0", comment="同服务商内展示排序（小在前）",
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow,
+    )
+
+
 class User(Base):
     """用户（多租户认证主体 + 个人资料）。
 
@@ -191,6 +234,13 @@ class User(Base):
     )
     plan_id: Mapped[str] = mapped_column(String(32), default="free", comment="当前套餐标识：free/pro/team")
     org_id: Mapped[str | None] = mapped_column(String(32), nullable=True, comment="组织归属（阶段C）")
+
+    ai_provider: Mapped[str | None] = mapped_column(
+        String(32), nullable=True, comment="用户选择的 AI 服务商（为NULL则跟随全局默认）",
+    )
+    ai_model: Mapped[str | None] = mapped_column(
+        String(128), nullable=True, comment="用户选择的模型标识（为NULL则选默认服务商）",
+    )
     privacy_mode: Mapped[bool] = mapped_column(
         Boolean, default=False, comment="隐私模式：不写入/不读取全局共享内容缓存",
     )

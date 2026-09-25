@@ -96,6 +96,13 @@ class PhoneBody(BaseModel):
     phone: str
 
 
+class AiSettingsBody(BaseModel):
+    """AI 默认模型设置：provider 与 model **必须同设同清**；均为 null 表示恢复跟随全局默认。"""
+
+    provider: str | None = None
+    model: str | None = None
+
+
 # --------------------------------------------------------------------------- #
 # 语义化异常 → HTTP 状态码映射（应用级处理器，兼容既有 {"detail": ...} 契约）
 # --------------------------------------------------------------------------- #
@@ -217,6 +224,13 @@ def change_phone(body: PhoneBody, user: CurrentUser = Depends(require_user)) -> 
     """绑定/换绑手机号（需当前密码确认）；``phone`` 传空串表示解绑。"""
     profile = service.change_phone(user.user_id or "", body.password, body.phone)
     return JSONResponse({"user": profile})
+
+
+@router.patch("/me/ai-settings")
+def patch_ai_settings(body: AiSettingsBody, user: CurrentUser = Depends(require_user)) -> JSONResponse:
+    """设置「一键 AI 分析」默认模型；``{provider: null, model: null}`` 恢复跟随全局默认。"""
+    profile = service.update_ai_settings(user.user_id or "", body.provider, body.model)
+    return JSONResponse({"user": profile, "ai": {"provider": body.provider, "model": body.model}})
 
 
 # --------------------------------------------------------------------------- #

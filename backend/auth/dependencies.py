@@ -30,6 +30,8 @@ class CurrentUser:
     email: str | None = None
     nickname: str | None = None
     plan_id: str = "free"
+    ai_provider: str | None = None
+    ai_model: str | None = None
     is_authenticated: bool = False
     scopes: tuple[str, ...] = field(default=())
 
@@ -71,6 +73,8 @@ def get_current_user(request: Request) -> CurrentUser:
         email=user.get("email"),
         nickname=user.get("nickname"),
         plan_id=user.get("plan_id") or "free",
+        ai_provider=user.get("ai_provider") or None,
+        ai_model=user.get("ai_model") or None,
         is_authenticated=True,
     )
 
@@ -100,3 +104,23 @@ def require_user_if_enabled(user: CurrentUser = Depends(get_current_user)) -> Cu
     if not user.is_authenticated:
         raise NotAuthenticatedError("请先登录后再使用。")
     return user
+
+
+def ai_override_cfg(user: CurrentUser):
+    """解析登录用户的「默认模型」覆盖配置（供 AI 业务端点使用）。
+
+    返回 None（跟随全局 env）的三种情形：
+    1. 未登录 / 未设置 ai_provider；
+    2. 所选模型已从 ai_models 目录下架或被删除（阶段3 管理端在线运营，
+       下架即时生效——已存该模型的用户自动回退，无需迁移数据）；
+    3. 所选服务商未配 Key。
+    延迟导入 ai.* 以避免包间耦合（auth 不硬依赖 ai 能力包）。
+    """
+    if not user.is_authenticated or not user.ai_provider:
+        return None
+    from backend.ai import catalog as ai_catalog
+    from backend.ai import config as ai_config
+
+    if user.ai_model and not ai_catalog.is_selectable(user.ai_provider, user.ai_model):
+        return None
+    return ai_config.load_config(provider=user.ai_provider, model=user.ai_model)

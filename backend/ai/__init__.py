@@ -16,18 +16,21 @@
 
 from __future__ import annotations
 
-from backend.ai.config import PROVIDERS, ai_available, current_label, load_config
+from backend.ai import catalog
+from backend.ai.config import PROVIDERS, ai_available, current_label, load_config, models_payload
 from backend.ai.summary import AINotConfiguredError, SummarizeError, summarize
 from backend.ai.mindmap import MindmapError, build_mindmap
 from backend.ai.qa import QAError, ask
 
 __all__ = [
+    "catalog",
     "summarize",
     "build_mindmap",
     "ask",
     "ai_available",
     "current_label",
     "load_config",
+    "models_payload",
     "PROVIDERS",
     "AINotConfiguredError",
     "SummarizeError",

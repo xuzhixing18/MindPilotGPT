@@ -5,8 +5,9 @@
  * state（authEnabled/authRequired/ffmpeg/aiAvailable）后，refreshAuthState 才能据
  * authEnabled 决定是否拉 /api/auth/me；sidebar 与 router 依赖登录态就绪。
  */
-import { loadHealth, $ } from './core.js';
-import { initAuthUI, refreshAuthState } from './auth-ui.js';
+import { loadHealth, $, state, ai } from './core.js';
+import { initAuthUI, refreshAuthState, renderAuthState } from './auth-ui.js';
+import { initModelPicker } from './model-picker.js';
 import { initSidebar } from './sidebar.js';
 import { registerRoute, startRouter } from './router.js';
 
@@ -40,7 +41,15 @@ const bootstrap = async () => {
   bindPayModal();
   await loadHealth();          // 写入 state（含 authEnabled，决定后续是否拉登录态）
   initAuthUI();                // 缓存弹窗 DOM 引用 + 绑定表单 + 注册 401 处理
+  initModelPicker();           // 顶栏「默认模型」按钮 → 模型选择弹窗
   await refreshAuthState();    // 拉 /api/auth/me（仅 authEnabled 时），广播 auth:changed
+  // 预热模型目录缓存（不阻塞启动）：顶栏「默认模型」与选择弹窗共用展示名，
+  // label 未指定的模型由后端回退大写 ID，这里就绪后刷新一次顶栏即可生效。
+  ai.models().then(({ res, data }) => {
+    if (!res.ok || !data) return;
+    state.aiModels = data;
+    renderAuthState();
+  }).catch(() => { /* 预热失败静默：打开弹窗时会再拉一次 */ });
   initSidebar();               // 订阅 bus，渲染历史/合集/登录引导
   registerRoutes();
   startRouter('#view-root');   // 首屏渲染（支持深链）

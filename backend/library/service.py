@@ -8,6 +8,7 @@ from __future__ import annotations
 from typing import Any
 
 from backend.ai import qa as ai_qa
+from backend.ai.config import LLMConfig
 from backend.library import config, store
 from backend.library.errors import CapExceededError, NotFoundError, ValidationError
 from backend.storage import transcript_key
@@ -209,10 +210,12 @@ def ask_in_session(
     text: str,
     question: str,
     fallback_history: list[dict] | None = None,
+    cfg: LLMConfig | None = None,
 ) -> tuple[dict[str, Any], str]:
     """会话编排：读 DB 历史组装上下文 → 调 ai.qa.ask → 事务内 append 本轮问答。
 
     :return: (问答结果, session_id)；session_id 为空时自动新建会话。
+    :param cfg: 覆盖 LLM 配置（用户默认模型）；None=按全局 env 解析
     :raises backend.library.errors.NotFoundError: session_id 不属于该用户
     :raises backend.ai 语义化异常: AINotConfiguredError / QAError（main.py 映射 503/502）
     """
@@ -225,7 +228,7 @@ def ask_in_session(
     sid = sess["id"]
 
     history = store.qa_recent(user_id, sid, config.qa_max_history_messages()) or fallback_history or None
-    result = ai_qa.ask(text, title, question, history=history)
+    result = ai_qa.ask(text, title, question, history=history, cfg=cfg)
 
     limit = config.MESSAGE_MAX_CHARS
     store.qa_append(user_id, sid, "user", (question or "")[:limit])
