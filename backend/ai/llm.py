@@ -90,15 +90,18 @@ def _post(endpoint: str, headers: dict[str, str], payload: dict[str, Any], timeo
         raise LLMError(f"调用大模型失败（网络异常）：{exc}") from exc
 
 
-def chat(
+def chat_meta(
     cfg: LLMConfig,
     messages: list[dict[str, str]],
     *,
     temperature: float = 0.3,
     max_tokens: int = 2048,
     timeout: float = 120.0,
-) -> str:
-    """发起一次 chat 补全，返回助手回复文本。
+) -> dict[str, Any]:
+    """发起一次 chat 补全，返回 ``{content, finish_reason, usage}``。
+
+    ``finish_reason=length`` 表示输出被 max_tokens 截断（结构化 JSON 被拦腰截断的
+    常见根因），usage 供成本/长度留痕；排查解析类故障时二者是关键证据。
 
     :raises LLMError: HTTP 错误、网络异常或响应结构异常
     """
@@ -116,6 +119,25 @@ def chat(
     }
     data = _post(endpoint, headers, payload, timeout)
     try:
-        return data["choices"][0]["message"]["content"] or ""
+        choice = data["choices"][0]
+        return {
+            "content": choice["message"]["content"] or "",
+            "finish_reason": choice.get("finish_reason"),
+            "usage": data.get("usage") or {},
+        }
     except (KeyError, IndexError, TypeError) as exc:
         raise LLMError(f"大模型响应格式异常：{str(data)[:300]}") from exc
+
+
+def chat(
+    cfg: LLMConfig,
+    messages: list[dict[str, str]],
+    *,
+    temperature: float = 0.3,
+    max_tokens: int = 2048,
+    timeout: float = 120.0,
+) -> str:
+    """发起一次 chat 补全，返回助手回复文本（``chat_meta`` 的便捷封装）。"""
+    return chat_meta(
+        cfg, messages, temperature=temperature, max_tokens=max_tokens, timeout=timeout
+    )["content"]

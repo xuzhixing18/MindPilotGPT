@@ -9,11 +9,10 @@
 
 from __future__ import annotations
 
-import json
-import re
 from typing import Any
 
 from backend.ai import config as ai_config
+from backend.ai import jsonx
 from backend.ai import llm
 from backend.ai.config import LLMConfig
 from backend import storage  # 总结缓存 + 并发去重（阶段0：SQLite）
@@ -22,7 +21,8 @@ from backend import storage  # 总结缓存 + 并发去重（阶段0：SQLite）
 _MAX_CHARS = 30000
 
 # 提示词版本：修改 _SYSTEM_PROMPT / _build_prompt 后手动 bump，旧总结缓存自然失效
-PROMPT_VERSION = "v1"
+# v2：新增「字符串值内禁未转义英文双引号/禁漏逗号尾随逗号」约束，降低偶发非法 JSON 概率
+PROMPT_VERSION = "v2"
 
 _SYSTEM_PROMPT = (
     "你是一位专业的视频内容分析助手，擅长把口语化、可能含识别错误的字幕，"
@@ -63,27 +63,8 @@ def _build_prompt(title: str, text: str, truncated: bool) -> str:
 要求：
 1. 全部使用简体中文；
 2. key_points 提炼 3~8 条，chapters 按内容顺序给出 2~6 个；
-3. 忠于字幕，不臆造不存在的信息；信息不足以支撑某字段时给出保守概括。"""
-
-
-def _extract_json(raw: str) -> dict[str, Any]:
-    """从 LLM 回复里稳健地提取 JSON 对象（容错 ```json 围栏与前后杂文本）。"""
-    text = (raw or "").strip()
-    fence = re.search(r"```(?:json)?\s*(.+?)\s*```", text, re.DOTALL)
-    if fence:
-        text = fence.group(1).strip()
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        pass
-    # 退化：截取第一个 { 到最后一个 }
-    start, end = text.find("{"), text.rfind("}")
-    if 0 <= start < end:
-        try:
-            return json.loads(text[start:end + 1])
-        except json.JSONDecodeError as exc:
-            raise SummarizeError(f"大模型返回内容无法解析为 JSON：{exc}") from exc
-    raise SummarizeError("大模型未返回有效的 JSON 结构。")
+3. 忠于字幕，不臆造不存在的信息；信息不足以支撑某字段时给出保守概括；
+4. JSON 字符串值内如需引用一律用中文引号「」，禁止未转义的英文双引号与反斜杠，禁止漏逗号或尾随逗号。"""
 
 
 def _normalize(data: dict[str, Any]) -> dict[str, Any]:
@@ -127,7 +108,6 @@ def summarize(
     :param text: 字幕全文
     :param title: 视频标题（辅助模型理解上下文）
     :param refresh: 为 True 时跳过缓存、强制重算并覆盖
-    :param cfg: 覆盖 LLM 配置（用户默认模型）；None=按全局 env 解析（匿名/兼容路径）
     :param cfg: 调用方解析好的 LLM 配置（用户默认模型覆盖）；None 时走全局 env 配置
     :raises AINotConfiguredError: 未配置大模型
     :raises SummarizeError: 字幕为空、调用失败或解析失败
@@ -163,11 +143,13 @@ def summarize(
             {"role": "user", "content": _build_prompt(title, trimmed, truncated)},
         ]
         try:
-            raw = llm.chat(cfg, messages, temperature=0.3, max_tokens=2048)
+            data = jsonx.chat_json(cfg, messages, temperature=0.3, max_tokens=4096)
         except llm.LLMError as exc:
             raise SummarizeError(str(exc)) from exc
+        except jsonx.JSONExtractError as exc:
+            raise SummarizeError(str(exc)) from exc
 
-        result = _normalize(_extract_json(raw))
+        result = _normalize(data)
         result["model"] = model_label
         result["truncated"] = truncated
         result["cached"] = False

@@ -10,7 +10,7 @@
             （system 含字幕 + 历史 + 当前问题）、空字幕/空问题/未配置/空回复/LLMError 映射
 
 关键：db.py 在「导入时」即按 DATABASE_URL 建 engine，故必须在导入任何 backend.* 之前，
-把 DATABASE_URL 指向临时库；并用 monkeypatch 替换 llm.chat 避免真实网络调用。
+把 DATABASE_URL 指向临时库；并用 monkeypatch 替换 llm.chat / llm.chat_meta 避免真实网络调用。
 
 运行：python tests/test_ai_mindmap_qa.py
 """
@@ -32,6 +32,7 @@ os.environ["CACHE_ENABLED"] = "true"
 
 from backend import storage  # noqa: E402
 from backend.ai import config as ai_config  # noqa: E402
+from backend.ai import jsonx  # noqa: E402
 from backend.ai import llm as llm_mod  # noqa: E402
 from backend.ai import mindmap as ai_mindmap  # noqa: E402
 from backend.ai import qa as ai_qa  # noqa: E402
@@ -73,9 +74,18 @@ def _set_fake_llm():
 
 
 def _patch_chat(fn):
-    """monkeypatch backend.ai.llm.chat，返回原函数以便还原。"""
-    orig = llm_mod.chat
+    """monkeypatch backend.ai.llm.chat 与 chat_meta（fn 返回回复文本），返回原函数元组以便还原。
+
+    总结/思维导图已改走 jsonx.chat_json → llm.chat_meta，qa 仍走 llm.chat，
+    故两者需同时替换；包装保证 chat_meta 返回 {content, finish_reason, usage} 结构。
+    """
+    orig = (llm_mod.chat, llm_mod.chat_meta)
+
+    def fake_meta(cfg, messages, **kwargs):
+        return {"content": fn(cfg, messages, **kwargs), "finish_reason": "stop", "usage": {}}
+
     llm_mod.chat = fn
+    llm_mod.chat_meta = fake_meta
     return orig
 
 
@@ -83,15 +93,18 @@ def _patch_chat(fn):
 # mindmap：解析与规整
 # --------------------------------------------------------------------------- #
 def test_mindmap_extract_json():
-    assert ai_mindmap._extract_json('{"title":"a","children":[]}')["title"] == "a"
-    assert ai_mindmap._extract_json('```json\n{"title":"x"}\n```')["title"] == "x"
-    assert ai_mindmap._extract_json('```{"title":"y"}```')["title"] == "y"  # 无 json 标识的围栏
-    assert ai_mindmap._extract_json('好的，结果：{"title":"z"} 希望')["title"] == "z"
-    assert ai_mindmap._extract_json('[{"title":"m"}]') == [{"title": "m"}]  # 根为数组
+    assert jsonx.extract_json('{"title":"a","children":[]}')["title"] == "a"
+    assert jsonx.extract_json('```json\n{"title":"x"}\n```')["title"] == "x"
+    assert jsonx.extract_json('```{"title":"y"}```')["title"] == "y"  # 无 json 标识的围栏
+    assert jsonx.extract_json('好的，结果：{"title":"z"} 希望')["title"] == "z"
+    assert jsonx.extract_json('[{"title":"m"}]') == [{"title": "m"}]  # 根为数组
+    # 偶发瑕疵服务端消化：漏逗号 / 尾随逗号本地修复
+    assert jsonx.extract_json('{"title":"a" "children":[]}')["title"] == "a"
+    assert jsonx.extract_json('{"title":"a","children":[],}')["children"] == []
     try:
-        ai_mindmap._extract_json("完全没有 JSON 内容")
-        assert False, "应抛 MindmapError"
-    except ai_mindmap.MindmapError:
+        jsonx.extract_json("完全没有 JSON 内容")
+        assert False, "应抛 JSONExtractError"
+    except jsonx.JSONExtractError:
         pass
     print("[mindmap] extract_json ok")
 
@@ -212,7 +225,7 @@ def test_build_mindmap_errors():
     except ai_mindmap.MindmapError:
         pass
     finally:
-        llm_mod.chat = orig
+        llm_mod.chat, llm_mod.chat_meta = orig
     print("[mindmap] empty-text / no-key / LLMError ok")
 
 
@@ -252,7 +265,7 @@ def test_build_mindmap_cache():
         r4 = ai_mindmap.build_mindmap(text, "标题")
         assert r4["cached"] is True and calls["n"] == 2  # 重算后再次命中
     finally:
-        llm_mod.chat = orig
+        llm_mod.chat, llm_mod.chat_meta = orig
     print("[mindmap] build_mindmap cache hit / refresh ok")
 
 
@@ -284,7 +297,7 @@ def test_build_mindmap_singleflight():
         assert calls["n"] == 1, f"single-flight 应只调一次 LLM，实际 {calls['n']}"
         assert results[0]["title"] == "并发中心" and results[1]["title"] == "并发中心"
     finally:
-        llm_mod.chat = orig
+        llm_mod.chat, llm_mod.chat_meta = orig
     print("[mindmap] single-flight concurrent computed once ok")
 
 
@@ -351,7 +364,7 @@ def test_qa_ask_messages():
         assert msgs[2]["role"] == "assistant"
         assert msgs[-1] == {"role": "user", "content": "第二个要点是什么？"}
     finally:
-        llm_mod.chat = orig
+        llm_mod.chat, llm_mod.chat_meta = orig
     print("[qa] ask messages structure ok")
 
 
@@ -385,7 +398,7 @@ def test_qa_errors():
     except ai_qa.QAError:
         pass
     finally:
-        llm_mod.chat = orig
+        llm_mod.chat, llm_mod.chat_meta = orig
     # LLMError -> QAError
     def _boom(cfg, messages, **kwargs):
         raise llm_mod.LLMError("上游限流")
@@ -397,7 +410,7 @@ def test_qa_errors():
     except ai_qa.QAError:
         pass
     finally:
-        llm_mod.chat = orig
+        llm_mod.chat, llm_mod.chat_meta = orig
     print("[qa] empty-text / empty-question / no-key / empty-answer / LLMError ok")
 
 

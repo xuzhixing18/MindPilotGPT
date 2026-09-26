@@ -2,7 +2,7 @@
 
 覆盖：
 - config    ：多 provider 解析、专属/通用 Key、模型与端点覆盖、自定义端点、无 Key 降级
-- summarize ：LLM 返回的 JSON 提取容错、结构规整、未配置时抛 AINotConfiguredError
+- summarize ：jsonx 稳健 JSON 提取容错、结构规整、未配置时抛 AINotConfiguredError
 - subtitles ：时间戳解析、VTT/SRT 解析、自动字幕相邻去重
 - asr       ：ASR provider 链解析（硅基流动/DashScope/自定义）、顺序、无 Key 降级、分段合成
 - 门面编排 ：无字幕时按平台给出差异化可操作提示
@@ -18,6 +18,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from backend.ai import config as ai_config  # noqa: E402
+from backend.ai import jsonx  # noqa: E402
 from backend.ai import summary as ai_summary  # noqa: E402
 from backend.transcribe import subtitles  # noqa: E402
 from backend.transcribe import asr  # noqa: E402
@@ -189,13 +190,15 @@ def test_config_per_provider_endpoint():
 
 
 def test_extract_json():
-    assert ai_summary._extract_json('{"one_line":"a","summary":"b"}')["one_line"] == "a"
-    assert ai_summary._extract_json('```json\n{"one_line":"x"}\n```')["one_line"] == "x"
-    assert ai_summary._extract_json('好的：{"one_line":"y"}  hope')["one_line"] == "y"
+    assert jsonx.extract_json('{"one_line":"a","summary":"b"}')["one_line"] == "a"
+    assert jsonx.extract_json('```json\n{"one_line":"x"}\n```')["one_line"] == "x"
+    assert jsonx.extract_json('好的：{"one_line":"y"}  hope')["one_line"] == "y"
+    # 偶发瑕疵服务端消化：漏逗号本地修复
+    assert jsonx.extract_json('{"one_line":"a" "summary":"b"}')["summary"] == "b"
     try:
-        ai_summary._extract_json("完全没有 JSON 内容")
-        assert False, "应抛 SummarizeError"
-    except ai_summary.SummarizeError:
+        jsonx.extract_json("完全没有 JSON 内容")
+        assert False, "应抛 JSONExtractError"
+    except jsonx.JSONExtractError:
         pass
     print("[extract_json] ok")
 

@@ -11,12 +11,11 @@
 
 from __future__ import annotations
 
-import json
-import re
 from typing import Any
 
 from backend import storage  # 思维导图缓存 + 并发去重（阶段0：SQLite）
 from backend.ai import config as ai_config
+from backend.ai import jsonx
 from backend.ai import llm
 from backend.ai.config import LLMConfig
 from backend.ai.summary import AINotConfiguredError  # 复用「未配置大模型」语义化异常
@@ -25,7 +24,8 @@ from backend.ai.summary import AINotConfiguredError  # 复用「未配置大模�
 _MAX_CHARS = 30000
 
 # 提示词版本：修改 _SYSTEM_PROMPT / _build_prompt 后手动 bump，旧缓存自然失效
-PROMPT_VERSION = "v1"
+# v2：新增「字符串值内禁未转义英文双引号/禁漏逗号尾随逗号」约束，降低偶发非法 JSON 概率
+PROMPT_VERSION = "v2"
 
 # 树的规模上限：限制深度与每层宽度，保证前端可渲染、响应体可控
 _MAX_DEPTH = 4
@@ -69,28 +69,8 @@ def _build_prompt(title: str, text: str, truncated: bool) -> str:
 1. 全部使用简体中文，节点标题精炼（每个不超过 24 字）；
 2. 一级分支 3~6 个，每个分支下二级要点 2~5 个，最多到三级；
 3. 忠于字幕内容，不臆造不存在的信息；叶子节点的 children 用空数组 []；
-4. 中心主题应概括整段视频主旨，而非照抄标题。"""
-
-
-def _extract_json(raw: str) -> Any:
-    """从 LLM 回复里稳健地提取 JSON（容错 ```json 围栏、前后杂文本、根为数组）。"""
-    text = (raw or "").strip()
-    fence = re.search(r"```(?:json)?\s*(.+?)\s*```", text, re.DOTALL)
-    if fence:
-        text = fence.group(1).strip()
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        pass
-    # 退化：截取第一个 { 到最后一个 }，或第一个 [ 到最后一个 ]
-    for open_c, close_c in (("{", "}"), ("[", "]")):
-        start, end = text.find(open_c), text.rfind(close_c)
-        if 0 <= start < end:
-            try:
-                return json.loads(text[start:end + 1])
-            except json.JSONDecodeError as exc:
-                raise MindmapError(f"大模型返回内容无法解析为 JSON：{exc}") from exc
-    raise MindmapError("大模型未返回有效的 JSON 结构。")
+4. 中心主题应概括整段视频主旨，而非照抄标题；
+5. JSON 字符串值内如需引用一律用中文引号「」，禁止未转义的英文双引号与反斜杠，禁止漏逗号或尾随逗号。"""
 
 
 def _find_root(data: Any) -> Any:
@@ -183,11 +163,13 @@ def build_mindmap(
             {"role": "user", "content": _build_prompt(title, trimmed, truncated)},
         ]
         try:
-            raw = llm.chat(cfg, messages, temperature=0.3, max_tokens=2048)
+            data = jsonx.chat_json(cfg, messages, temperature=0.3, max_tokens=4096)
         except llm.LLMError as exc:
             raise MindmapError(str(exc)) from exc
+        except jsonx.JSONExtractError as exc:
+            raise MindmapError(str(exc)) from exc
 
-        root = _normalize_node(_find_root(_extract_json(raw)))
+        root = _normalize_node(_find_root(data))
         if root is None:
             raise MindmapError("大模型未返回有效的思维导图结构。")
         result = {
