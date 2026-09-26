@@ -11,6 +11,8 @@ httpx>=0.27.0
 python-dotenv>=1.0.0
 # 阶段0 内容缓存持久化：ORM 抽象（默认 SQLite，阶段1改 DATABASE_URL 即迁 Postgres）
 SQLAlchemy>=2.0
+# PostgreSQL 驱动（psycopg3）：DATABASE_URL 指向 postgresql+psycopg:// 时使用；默认 SQLite 无需
+psycopg[binary]>=3.1
 # 多租户认证地基：密码哈希（argon2id，业界推荐）；未安装时 security.py 自动回退 PBKDF2
 argon2-cffi>=23.1.0
 # 头像等文件上传：FastAPI 的 File/UploadFile（multipart 表单）依赖此包

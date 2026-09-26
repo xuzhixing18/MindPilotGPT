@@ -16,9 +16,13 @@ from typing import Any
 from sqlalchemy import (
     JSON, Boolean, Date, DateTime, Float, Index, Integer, String, Text, UniqueConstraint, false, true,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from backend.storage.db import Base
+
+# JSON 列：Postgres 用 JSONB（可建 GIN 索引、支持 ->/->> 路径查询），SQLite 等方言回退通用 JSON
+JSONCol = JSON().with_variant(JSONB, "postgresql")
 
 
 def _utcnow() -> datetime:
@@ -38,7 +42,7 @@ class Transcript(Base):
     language: Mapped[str] = mapped_column(String(32), default="")
     language_name: Mapped[str] = mapped_column(String(64), default="")
     char_count: Mapped[int] = mapped_column(Integer, default=0)
-    segments: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    segments: Mapped[list[Any]] = mapped_column(JSONCol, default=list)
     text: Mapped[str] = mapped_column(Text, default="")
     asr_provider: Mapped[str | None] = mapped_column(String(64), nullable=True)
     webpage_url: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -54,7 +58,7 @@ class Summary(Base):
     model: Mapped[str] = mapped_column(String(128), default="")
     prompt_version: Mapped[str] = mapped_column(String(16), default="")
     title: Mapped[str] = mapped_column(Text, default="")
-    summary: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    summary: Mapped[dict[str, Any]] = mapped_column(JSONCol, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 
@@ -70,7 +74,7 @@ class Mindmap(Base):
     model: Mapped[str] = mapped_column(String(128), default="")
     prompt_version: Mapped[str] = mapped_column(String(16), default="")
     title: Mapped[str] = mapped_column(Text, default="")
-    mindmap: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    mindmap: Mapped[dict[str, Any]] = mapped_column(JSONCol, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 class Comment(Base):
@@ -103,7 +107,7 @@ class Comment(Base):
     )
     total: Mapped[int] = mapped_column(Integer, default=0, comment="高赞评论条数（TopN 截断后）")
     comments: Mapped[list[Any]] = mapped_column(
-        JSON, default=list,
+        JSONCol, default=list,
         comment="高赞评论 JSON 列表：[{author,text,likes,time}]，按点赞降序",
     )
     created_at: Mapped[datetime] = mapped_column(
@@ -129,7 +133,7 @@ class VideoInfo(Base):
         Text, default="", index=True, comment="规范化视频链接（跨链接形式命中同一缓存）",
     )
     payload: Mapped[dict[str, Any]] = mapped_column(
-        JSON, default=dict, comment="解析结果快照：标题/封面/时长/清晰度列表等",
+        JSONCol, default=dict, comment="解析结果快照：标题/封面/时长/清晰度列表等",
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, comment="写入/刷新时间（UTC），用于 TTL 过期判断",
@@ -297,7 +301,7 @@ class UserHistory(Base):
     url: Mapped[str] = mapped_column(Text, default="", comment="原始链接快照（结果页回用）")
     title: Mapped[str] = mapped_column(Text, default="", comment="标题快照（缓存过期仍可读）")
     kinds: Mapped[list[Any]] = mapped_column(
-        JSON, default=list, comment="已生成内容：transcribe/summary/mindmap/comments/qa 子集",
+        JSONCol, default=list, comment="已生成内容：transcribe/summary/mindmap/comments/qa 子集",
     )
     source: Mapped[str] = mapped_column(String(32), default="", comment="来源平台：bilibili / douyin / generic")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)

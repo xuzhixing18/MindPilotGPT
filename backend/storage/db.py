@@ -27,6 +27,16 @@ log = logging.getLogger(__name__)
 _ROOT = Path(__file__).resolve().parents[2]
 _DEFAULT_DB_PATH = _ROOT / "data" / "mindpilot.db"
 
+# 尽力加载 .env（override=False：不覆盖已存在的进程/系统环境变量，测试仍可预设 DATABASE_URL 隔离）。
+# 必须在此加载：db.py 可能先于 ai.config 被导入，若不加载则 .env 里的 DATABASE_URL 不生效、
+# 静默回退 SQLite，造成「改了 .env 却仍连 SQLite」的配置陷阱。
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv(_ROOT / ".env")
+except ImportError:  # pragma: no cover - python-dotenv 可选
+    pass
+
 
 def _database_url() -> str:
     """读取数据库 URL；未配置时回退到项目内 SQLite 文件。"""
@@ -46,7 +56,20 @@ _IS_SQLITE = DATABASE_URL.startswith("sqlite")
 # sqlite 需 check_same_thread=False 以适配 FastAPI 线程池；其他驱动不需要该参数
 _connect_args = {"check_same_thread": False} if _IS_SQLITE else {}
 
-engine = create_engine(DATABASE_URL, connect_args=_connect_args, future=True)
+# Postgres 需连接池调优：pre_ping 防服务端重启/网络抖动后的 stale 连接，recycle 防云 LB/
+# 防火墙掐断空闲连接；SQLite 单文件无此问题，保持默认池行为。
+_pool_kwargs = (
+    {}
+    if _IS_SQLITE
+    else {
+        "pool_size": 10,
+        "max_overflow": 20,
+        "pool_pre_ping": True,
+        "pool_recycle": 1800,
+    }
+)
+
+engine = create_engine(DATABASE_URL, connect_args=_connect_args, future=True, **_pool_kwargs)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False, future=True)
 
 if _IS_SQLITE:
