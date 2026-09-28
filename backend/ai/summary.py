@@ -124,7 +124,7 @@ def summarize(
     model_label = f"{cfg.label} · {cfg.model}"
     key = storage.summary_key(text, model_label, PROMPT_VERSION)
     if not refresh:
-        hit = storage.repo.get_summary(key)
+        hit = storage.repo.get_artifact(storage.repo.ARTIFACT_SUMMARY, key)
         if hit is not None:
             hit["cached"] = True
             return hit
@@ -132,7 +132,7 @@ def summarize(
     def _do() -> dict[str, Any]:
         # 双重检查：拿到 single-flight 锁后再查一次，避免并发重复调用 LLM
         if not refresh:
-            hit = storage.repo.get_summary(key)
+            hit = storage.repo.get_artifact(storage.repo.ARTIFACT_SUMMARY, key)
             if hit is not None:
                 hit["cached"] = True
                 return hit
@@ -153,8 +153,9 @@ def summarize(
         result["model"] = model_label
         result["truncated"] = truncated
         result["cached"] = False
-        storage.repo.put_summary(
-            key, result, model=model_label, prompt_version=PROMPT_VERSION, title=title
+        storage.repo.put_artifact(
+            storage.repo.ARTIFACT_SUMMARY, key, result,
+            model=model_label, prompt_version=PROMPT_VERSION, title=title,
         )
         return result
 

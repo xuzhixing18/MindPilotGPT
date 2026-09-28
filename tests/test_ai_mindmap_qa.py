@@ -4,7 +4,7 @@
 - mindmap ：LLM 回复的 JSON 提取容错、树根定位（root/mindmap/tree/data 包裹或数组）、
             节点规整（别名 title/name/text/label、children/nodes/sub/items/child、
             超深/超宽/空节点裁剪）、mindmap_key 敏感性与键空间隔离、
-            repo get/put_mindmap 往返、build_mindmap 缓存命中/refresh/single-flight、
+            repo get/put_artifact 往返（kind=mindmap）、build_mindmap 缓存命中/refresh/single-flight、
             空文本与未配置的语义化异常
 - qa      ：_sanitize_history 清洗（角色/长度/条数/非 list）、ask 的 messages 结构
             （system 含字幕 + 历史 + 当前问题）、空字幕/空问题/未配置/空回复/LLMError 映射
@@ -189,13 +189,15 @@ def test_repo_mindmap_roundtrip():
         "title": "中心", "children": [{"title": "分支", "children": []}],
         "model": _MODEL_LABEL, "truncated": False, "cached": False,
     }
-    repo.put_mindmap(key, mm, model=_MODEL_LABEL, prompt_version="v1", title="标题")
-    got = repo.get_mindmap(key)
+    repo.put_artifact(repo.ARTIFACT_MINDMAP, key, mm,
+                      model=_MODEL_LABEL, prompt_version="v1", title="标题")
+    got = repo.get_artifact(repo.ARTIFACT_MINDMAP, key)
     assert got is not None
     assert got["title"] == "中心"
     assert got["children"] == [{"title": "分支", "children": []}]
     assert "cached" not in got  # put 时剔除运行时标记
-    assert repo.get_mindmap(keys.mindmap_key("不存在的文本", "m", "v1")) is None  # 未命中
+    assert repo.get_artifact(repo.ARTIFACT_MINDMAP,
+                             keys.mindmap_key("不存在的文本", "m", "v1")) is None  # 未命中
     print("[repo] mindmap roundtrip ok")
 
 

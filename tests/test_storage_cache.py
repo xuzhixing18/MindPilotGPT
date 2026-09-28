@@ -3,7 +3,8 @@
 覆盖：
 - keys        ：normalize_url 丢跟踪参/保留 ?v=/host 小写；同视频不同跟踪参得到同一 key；
                 summary_key 对 model / prompt_version / text 敏感
-- repo        ：put/get_transcript、put/get_summary 往返一致；转写 TTL 过期视为未命中；
+- repo        ：put/get_transcript、put/get_artifact（总结/导图两 kind）、put/get_info 往返一致；
+  转写 TTL 过期视为未命中；
                 CACHE_ENABLED=false 时读写短路
 - singleflight：两线程并发同 key，底层 compute 只执行一次
 - 门面缓存     ：monkeypatch subtitles.transcribe 后，第二次 transcribe(url) 命中缓存
@@ -32,6 +33,8 @@ os.environ.pop("TRANSCRIPT_CACHE_DAYS", None)
 from backend import storage  # noqa: E402
 from backend.storage import db as sdb  # noqa: E402
 from backend.storage import keys, models, repo, singleflight  # noqa: E402
+from sqlalchemy import select  # noqa: E402
+from sqlalchemy import select  # noqa: E402
 
 
 def _transcript_stub(text: str = "你好世界") -> dict:
@@ -102,21 +105,32 @@ def test_repo_transcript_roundtrip():
     print("[repo] transcript roundtrip ok")
 
 
-def test_repo_summary_roundtrip():
+def test_repo_artifact_roundtrip():
+    """总结/导图共用 ai_artifacts 表：同表不同 kind 各存各的、互不串扰。"""
     key = keys.summary_key("总结文本", "deepseek · deepseek-chat", "v1")
     summary = {
         "one_line": "一句话", "summary": "摘要", "key_points": ["a", "b"],
         "chapters": [{"title": "c", "summary": "s"}], "keywords": ["k"],
         "model": "deepseek · deepseek-chat", "truncated": False, "cached": False,
     }
-    repo.put_summary(key, summary, model="deepseek · deepseek-chat", prompt_version="v1", title="标题")
-    got = repo.get_summary(key)
+    repo.put_artifact(repo.ARTIFACT_SUMMARY, key, summary,
+                      model="deepseek · deepseek-chat", prompt_version="v1", title="标题")
+    got = repo.get_artifact(repo.ARTIFACT_SUMMARY, key)
     assert got is not None
     assert got["one_line"] == "一句话"
     assert got["key_points"] == ["a", "b"]
     assert got["chapters"] == [{"title": "c", "summary": "s"}]
     assert "cached" not in got  # put 时已剔除运行时 cached 标记
-    print("[repo] summary roundtrip ok")
+
+    # 同文本同模型导图走另一 kind：内容独立、且按 (kind, key) 与总结互不干扰
+    mkey = keys.mindmap_key("总结文本", "deepseek · deepseek-chat", "v1")
+    repo.put_artifact(repo.ARTIFACT_MINDMAP, mkey, {"title": "导图中心", "children": []},
+                      model="deepseek · deepseek-chat", prompt_version="v1", title="标题")
+    assert repo.get_artifact(repo.ARTIFACT_MINDMAP, mkey)["title"] == "导图中心"
+    assert repo.get_artifact(repo.ARTIFACT_SUMMARY, mkey) is None  # kind 隔离
+    assert repo.get_artifact(
+        repo.ARTIFACT_SUMMARY, keys.summary_key("不存在", "m", "v1")) is None  # 未命中
+    print("[repo] artifact roundtrip ok（summary/mindmap 同表 kind 隔离）")
 
 
 def test_repo_transcript_expiry():
@@ -127,7 +141,7 @@ def test_repo_transcript_expiry():
 
     # 手动把 created_at 拨到远超 TTL（默认 30 天）之前 -> 视为过期未命中
     with storage.session() as s:
-        row = s.get(models.Transcript, key)
+        row = s.scalar(select(models.Transcript).where(models.Transcript.key == key))
         row.created_at = datetime.now(timezone.utc) - timedelta(days=999)
     assert repo.get_transcript(key) is None
 
@@ -140,6 +154,28 @@ def test_repo_transcript_expiry():
     print("[repo] transcript TTL expiry ok")
 
 
+def test_repo_info_roundtrip():
+    """video_infos（已对齐为 id 自增主键）：按业务键 upsert 往返一致 + TTL 过期未命中。"""
+    url = "https://www.bilibili.com/video/BV1info"
+    key = keys.transcript_key(url)
+    payload = {"title": "信息卡", "thumbnail": "https://x/t.jpg", "duration": 60,
+               "formats": [{"format_id": "18", "resolution": "360p"}], "cached": True}
+    repo.put_info(key, payload, url, keys.normalize_url(url))
+    got = repo.get_info(key)
+    assert got["title"] == "信息卡" and got["duration"] == 60
+    assert got["formats"] == [{"format_id": "18", "resolution": "360p"}]
+    assert "cached" not in got                     # put 时已剔除运行时标记
+
+    repo.put_info(key, {**payload, "title": "刷新后"}, url, keys.normalize_url(url))
+    assert repo.get_info(key)["title"] == "刷新后"   # 同键 upsert 覆盖（撞唯一约束会报错）
+
+    with storage.session() as s:                   # 拨到远超默认 24h 之前 -> 过期未命中
+        row = s.scalar(select(models.VideoInfo).where(models.VideoInfo.key == key))
+        row.created_at = datetime.now(timezone.utc) - timedelta(hours=999)
+    assert repo.get_info(key) is None
+    print("[repo] video_info roundtrip / upsert / TTL ok")
+
+
 def test_cache_disabled_shortcircuit():
     url = "https://x.com/disabled"
     key = keys.transcript_key(url)
@@ -148,8 +184,9 @@ def test_cache_disabled_shortcircuit():
         repo.put_transcript(key, _transcript_stub("不该被写入"), url, keys.normalize_url(url))
         assert repo.get_transcript(key) is None  # 关闭时写跳过、读未命中
         skey = keys.summary_key("t", "m", "v1")
-        repo.put_summary(skey, {"one_line": "x"}, model="m", prompt_version="v1")
-        assert repo.get_summary(skey) is None
+        repo.put_artifact(repo.ARTIFACT_SUMMARY, skey, {"one_line": "x"},
+                          model="m", prompt_version="v1")
+        assert repo.get_artifact(repo.ARTIFACT_SUMMARY, skey) is None
     finally:
         os.environ["CACHE_ENABLED"] = "true"
     print("[repo] CACHE_ENABLED=false short-circuit ok")
@@ -237,8 +274,9 @@ if __name__ == "__main__":
         test_normalize_url()
         test_summary_key_sensitive()
         test_repo_transcript_roundtrip()
-        test_repo_summary_roundtrip()
+        test_repo_artifact_roundtrip()
         test_repo_transcript_expiry()
+        test_repo_info_roundtrip()
         test_cache_disabled_shortcircuit()
         test_singleflight_dedup()
         test_facade_cache()

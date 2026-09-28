@@ -14,7 +14,8 @@ from datetime import date, datetime, timezone
 from typing import Any
 
 from sqlalchemy import (
-    JSON, Boolean, Date, DateTime, Float, Index, Integer, String, Text, UniqueConstraint, false, true,
+    JSON, Boolean, Date, DateTime, Float, Index, Integer, String, Text,
+    UniqueConstraint, false, true,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
@@ -30,11 +31,23 @@ def _utcnow() -> datetime:
 
 
 class Transcript(Base):
-    """转写结果缓存（全局共享，按规范化 URL 的哈希为主键）。"""
+    """转写结果缓存（全局共享，按规范化 URL 的哈希去重，跨链接形式命中同一缓存）。
+
+    ``id`` 为自增代理主键；业务键 ``key`` 保留为唯一约束——去重/命中语义仍由它承载，
+    id 不参与任何业务寻址（本表无任何外键引用，纯点查缓存）。
+    """
 
     __tablename__ = "transcripts"
+    __table_args__ = (
+        UniqueConstraint("key", name="uq_transcripts_key"),
+        {"comment": "转写结果缓存表（TTL=TRANSCRIPT_CACHE_DAYS）"},
+    )
 
-    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True, comment="代理主键（自增）")
+    key: Mapped[str] = mapped_column(
+        String(64),
+        comment="缓存业务键：transcript_key(url) 的 sha256（跨链接形式归一，唯一约束承载去重）",
+    )
     url: Mapped[str] = mapped_column(Text, default="")
     normalized_url: Mapped[str] = mapped_column(Text, default="", index=True)
     title: Mapped[str] = mapped_column(Text, default="")
@@ -49,48 +62,60 @@ class Transcript(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 
-class Summary(Base):
-    """AI 总结缓存（按 文本哈希 + 模型 + 提示词版本 为主键，跨 URL 复用）。"""
+class AiArtifact(Base):
+    """AI 生成内容缓存（总结 / 思维导图）：按 (kind, 内容哈希) 区分内容身份，跨 URL 复用。
 
-    __tablename__ = "summaries"
+    合并产物：原 ``summaries`` / ``mindmaps`` 两表列结构完全一致，合并为一张表
+    以 ``kind`` 区分（``summary`` / ``mindmap``），payload 统一承载生成内容本体。
+    与转写/评论缓存不同族：键锚定「文本×模型×prompt 版本」，不设 TTL，任一维度
+    变更即自然失效（旧版本行由运营清扫）。
 
-    key: Mapped[str] = mapped_column(String(64), primary_key=True)
-    model: Mapped[str] = mapped_column(String(128), default="")
-    prompt_version: Mapped[str] = mapped_column(String(16), default="")
-    title: Mapped[str] = mapped_column(Text, default="")
-    summary: Mapped[dict[str, Any]] = mapped_column(JSONCol, default=dict)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    ``id`` 为自增代理主键；业务键 ``(kind, key)`` 保留为唯一约束——跨类隔离与去重仍由它承载。
 
-
-class Mindmap(Base):
-    """AI 思维导图缓存（按 文本哈希 + 模型 + 提示词版本 为主键，跨 URL 复用）。
-
-    与 Summary 同构：不设 TTL，键含模型与提示词版本，任一变更即自然失效。
+    旧两表数据由 ``storage.migrations`` 在启动时一次性并入本表后删旧表（幂等）。
     """
 
-    __tablename__ = "mindmaps"
+    __tablename__ = "ai_artifacts"
+    __table_args__ = (
+        UniqueConstraint("kind", "key", name="uq_ai_artifacts_kind_key"),
+        {"comment": "AI 生成内容缓存（kind=summary/mindmap，键含模型与提示词版本）"},
+    )
 
-    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True, comment="代理主键（自增）")
+    kind: Mapped[str] = mapped_column(
+        String(16), comment="内容种类：summary / mindmap",
+    )
+    key: Mapped[str] = mapped_column(
+        String(64), comment="内容身份键：sha256(文本+模型+提示词版本)",
+    )
     model: Mapped[str] = mapped_column(String(128), default="")
     prompt_version: Mapped[str] = mapped_column(String(16), default="")
     title: Mapped[str] = mapped_column(Text, default="")
-    mindmap: Mapped[dict[str, Any]] = mapped_column(JSONCol, default=dict)
+    payload: Mapped[dict[str, Any]] = mapped_column(
+        JSONCol, default=dict, comment="生成内容本体（总结结构化字段或导图树）",
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 class Comment(Base):
-    """高赞评论缓存（按规范化 URL 的哈希为主键）
+    """高赞评论缓存（按规范化 URL 的哈希去重）
 
+    ``id`` 为自增代理主键；业务键 ``key`` 保留为唯一约束——去重/命中语义仍由它承载，
+    id 不参与任何业务寻址（本表无任何外键引用，纯点查缓存）。
     支持列注释的数据库（Postgres/MySQL，阶段1 目标）会在 DDL 中生成列注释；
     SQLite 无列注释语法，备注存于元数据，迁移后自动生效。
     """
 
     __tablename__ = "comments"
-    __table_args__ = {"comment": "高赞评论缓存表（TTL=COMMENTS_CACHE_HOURS）"}
+    __table_args__ = (
+        UniqueConstraint("key", name="uq_comments_key"),
+        {"comment": "高赞评论缓存表（TTL=COMMENTS_CACHE_HOURS）"},
+    )
 
-    # 缓存主键：comments_key(url) 的 sha256（域前缀 + 规范化 URL），同一视频唯一
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True, comment="代理主键（自增）")
+    # 缓存业务键：comments_key(url) 的 sha256（域前缀 + 规范化 URL），唯一约束承载去重
     key: Mapped[str] = mapped_column(
-        String(64), primary_key=True,
-        comment="缓存主键：comments_key(url) 的 sha256（域前缀+规范化URL）",
+        String(64),
+        comment="缓存业务键：comments_key(url) 的 sha256（域前缀+规范化URL）",
     )
     # 原始视频链接（用户输入/抓取时的 URL，未规范化）
     url: Mapped[str] = mapped_column(Text, default="", comment="原始视频链接（未规范化）")
@@ -120,13 +145,20 @@ class VideoInfo(Base):
 
     键与转写一致（``transcript_key(url)``），使历史/结果页二次打开秒回；
     TTL 由 ``INFO_CACHE_HOURS`` 控制（默认 24h）。下载仍走实时解析，保证直链新鲜。
+
+    ``id`` 为自增代理主键；业务键 ``key`` 保留为唯一约束（与其余缓存表形状一致），
+    id 不参与任何业务寻址（本表无任何外键引用，纯点查缓存）。
     """
 
     __tablename__ = "video_infos"
-    __table_args__ = {"comment": "视频信息缓存表（TTL=INFO_CACHE_HOURS）"}
+    __table_args__ = (
+        UniqueConstraint("key", name="uq_video_infos_key"),
+        {"comment": "视频信息缓存表（TTL=INFO_CACHE_HOURS）"},
+    )
 
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True, comment="代理主键（自增）")
     key: Mapped[str] = mapped_column(
-        String(64), primary_key=True, comment="缓存主键：transcript_key(url)",
+        String(64), comment="缓存业务键：transcript_key(url)（唯一约束承载去重）",
     )
     url: Mapped[str] = mapped_column(Text, default="", comment="原始视频链接（未规范化）")
     normalized_url: Mapped[str] = mapped_column(

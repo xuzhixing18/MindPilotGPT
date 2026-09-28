@@ -1,9 +1,13 @@
-"""缓存仓储：转写 / 总结结果的读写（对上层屏蔽 ORM 细节）。
+"""缓存仓储：转写 / AI 生成内容 / 评论 / 视频信息的读写（对上层屏蔽 ORM 细节）。
 
 - 读：转写按 ``TRANSCRIPT_CACHE_DAYS``（默认 30 天）判断过期，过期视为未命中；
-  总结不设 TTL（其键含模型与提示词版本，变更即自然失效）。
+  评论 / 视频信息按各自 TTL 判断；AI 生成内容（总结/导图）不设 TTL——
+  其键含模型与提示词版本，变更即自然失效。
 - 写：upsert（存在则更新），并刷新 ``created_at``。
 - 开关：``CACHE_ENABLED=false`` 时读一律未命中、写直接跳过（便于对照与排障）。
+
+AI 生成内容统一存 ``ai_artifacts`` 表（方案B 合并产物）：以 ``kind`` 区分
+总结/导图，CRUD 收敛为一对 ``get_artifact`` / ``put_artifact``。
 
 存储的是「纯数据」，不含运行时的 ``cached`` 标记——命中与否由服务层负责标注。
 """
@@ -16,6 +20,12 @@ from typing import Any
 
 from backend.storage import models
 from backend.storage.db import session
+from sqlalchemy import select
+
+
+def _by_key(model, key: str):
+    """按业务键查询的语句（缓存表主键已是自增 id，业务寻址一律走 key 唯一索引）。"""
+    return select(model).where(model.key == key)
 
 _FALSEY = {"0", "false", "no", "off", ""}
 
@@ -64,7 +74,7 @@ def get_transcript(key: str) -> dict[str, Any] | None:
     if not _enabled():
         return None
     with session() as s:
-        row = s.get(models.Transcript, key)
+        row = s.scalar(_by_key(models.Transcript, key))
         if row is None or _expired(row.created_at):
             return None
         return _transcript_to_dict(row)
@@ -75,7 +85,7 @@ def put_transcript(key: str, result: dict[str, Any], url: str, normalized_url: s
     if not _enabled():
         return
     with session() as s:
-        row = s.get(models.Transcript, key)
+        row = s.scalar(_by_key(models.Transcript, key))
         if row is None:
             row = models.Transcript(key=key)
             s.add(row)
@@ -93,73 +103,52 @@ def put_transcript(key: str, result: dict[str, Any], url: str, normalized_url: s
         row.created_at = datetime.now(timezone.utc)
 
 
-def get_summary(key: str) -> dict[str, Any] | None:
-    """按 key 取总结缓存；未命中 / 缓存关闭 → None（返回纯 summary 数据）。"""
+# AI 生成内容的种类常量（与 ai_artifacts.kind 对应；键含模型与提示词版本，变更即自然失效）
+ARTIFACT_SUMMARY = "summary"
+ARTIFACT_MINDMAP = "mindmap"
+
+
+def get_artifact(kind: str, key: str) -> dict[str, Any] | None:
+    """按 (kind, key) 取 AI 生成内容缓存；未命中 / 缓存关闭 → None（返回纯 payload 数据）。"""
     if not _enabled():
         return None
     with session() as s:
-        row = s.get(models.Summary, key)
+        row = s.scalar(
+            select(models.AiArtifact).where(
+                models.AiArtifact.kind == kind, models.AiArtifact.key == key
+            )
+        )
         if row is None:
             return None
-        return dict(row.summary or {})
+        return dict(row.payload or {})
 
 
-def put_summary(
+def put_artifact(
+    kind: str,
     key: str,
-    summary: dict[str, Any],
+    payload: dict[str, Any],
     *,
     model: str,
     prompt_version: str,
     title: str = "",
 ) -> None:
-    """写入 / 更新总结缓存（upsert）；剔除运行时 cached 标记后再存。"""
+    """写入 / 更新 AI 生成内容缓存（upsert）；剔除运行时 cached 标记后再存。"""
     if not _enabled():
         return
-    clean = {k: v for k, v in (summary or {}).items() if k != "cached"}
+    clean = {k: v for k, v in (payload or {}).items() if k != "cached"}
     with session() as s:
-        row = s.get(models.Summary, key)
+        row = s.scalar(
+            select(models.AiArtifact).where(
+                models.AiArtifact.kind == kind, models.AiArtifact.key == key
+            )
+        )
         if row is None:
-            row = models.Summary(key=key)
+            row = models.AiArtifact(kind=kind, key=key)
             s.add(row)
         row.model = model or ""
         row.prompt_version = prompt_version or ""
         row.title = title or ""
-        row.summary = clean
-        row.created_at = datetime.now(timezone.utc)
-
-
-def get_mindmap(key: str) -> dict[str, Any] | None:
-    """按 key 取思维导图缓存；未命中 / 缓存关闭 → None（返回纯 mindmap 数据）。"""
-    if not _enabled():
-        return None
-    with session() as s:
-        row = s.get(models.Mindmap, key)
-        if row is None:
-            return None
-        return dict(row.mindmap or {})
-
-
-def put_mindmap(
-    key: str,
-    mindmap: dict[str, Any],
-    *,
-    model: str,
-    prompt_version: str,
-    title: str = "",
-) -> None:
-    """写入 / 更新思维导图缓存（upsert）；剔除运行时 cached 标记后再存。"""
-    if not _enabled():
-        return
-    clean = {k: v for k, v in (mindmap or {}).items() if k != "cached"}
-    with session() as s:
-        row = s.get(models.Mindmap, key)
-        if row is None:
-            row = models.Mindmap(key=key)
-            s.add(row)
-        row.model = model or ""
-        row.prompt_version = prompt_version or ""
-        row.title = title or ""
-        row.mindmap = clean
+        row.payload = clean
         row.created_at = datetime.now(timezone.utc)
 
 
@@ -197,7 +186,7 @@ def get_comments(key: str) -> dict[str, Any] | None:
     if not _enabled():
         return None
     with session() as s:
-        row = s.get(models.Comment, key)
+        row = s.scalar(_by_key(models.Comment, key))
         if row is None or _comments_expired(row.created_at):
             return None
         return _comment_to_dict(row)
@@ -208,7 +197,7 @@ def put_comments(key: str, result: dict[str, Any], url: str, normalized_url: str
     if not _enabled():
         return
     with session() as s:
-        row = s.get(models.Comment, key)
+        row = s.scalar(_by_key(models.Comment, key))
         if row is None:
             row = models.Comment(key=key)
             s.add(row)
@@ -245,7 +234,7 @@ def get_info(key: str) -> dict[str, Any] | None:
     if not _enabled():
         return None
     with session() as s:
-        row = s.get(models.VideoInfo, key)
+        row = s.scalar(_by_key(models.VideoInfo, key))
         if row is None or _info_expired(row.created_at):
             return None
         return dict(row.payload or {})
@@ -257,7 +246,7 @@ def put_info(key: str, payload: dict[str, Any], url: str, normalized_url: str = 
         return
     clean = {k: v for k, v in (payload or {}).items() if k != "cached"}
     with session() as s:
-        row = s.get(models.VideoInfo, key)
+        row = s.scalar(_by_key(models.VideoInfo, key))
         if row is None:
             row = models.VideoInfo(key=key)
             s.add(row)

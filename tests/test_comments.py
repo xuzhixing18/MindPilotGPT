@@ -28,6 +28,7 @@ os.environ.pop("COMMENTS_CACHE_HOURS", None)
 
 from backend import comments, storage  # noqa: E402
 from backend.storage import keys, models, repo  # noqa: E402
+from sqlalchemy import select  # noqa: E402
 
 storage.init_db()
 
@@ -85,7 +86,7 @@ def test_repo_ttl():
     assert repo.get_comments(key) is not None           # 新鲜命中
 
     with storage.session() as s:                        # 拨到远超默认 12h 之前
-        s.get(models.Comment, key).created_at = datetime.now(timezone.utc) - timedelta(hours=999)
+        s.scalar(select(models.Comment).where(models.Comment.key == key)).created_at = datetime.now(timezone.utc) - timedelta(hours=999)
     assert repo.get_comments(key) is None               # 过期未命中
 
     os.environ["COMMENTS_CACHE_HOURS"] = "0"            # <=0 永不过期

@@ -9,6 +9,10 @@
 - 唯一索引同步（ix_users_email / ix_users_phone 均 unique）——这是手机号唯一性的唯一承载
 - 数据零丢失 + 一次性数据修正（email='' → NULL，否则多个纯手机号账号会撞唯一索引）
 - 幂等（二次执行 APPLIED 为空）与重建前自动备份 *.pre-migration.bak
+- 方案B 表级合并：旧 summaries/mindmaps 数据并入 ai_artifacts 后删旧表，
+  按 (kind, key) 主键防重，payload 原样保留，二次执行无动作
+- 缓存表加自增代理主键：transcripts/video_infos 旧结构（业务键为主键）→ id 主键，
+  业务键降级为唯一约束，存量数据与 payload 零丢失、repo 读路径仍命中
 
 运行：python tests/test_migrations.py
 """
@@ -176,6 +180,229 @@ def test_multiple_null_emails_coexist():
     print("[mig] NULL email 可共存 + 重复手机号被拒 ok")
 
 
+# 方案B 合并前的旧缓存表（结构 = 当年 ORM 所建，payload 列分别为 summary / mindmap）
+_LEGACY_ARTIFACT_DDL = """
+CREATE TABLE summaries (
+    key VARCHAR(64) NOT NULL,
+    model VARCHAR(128) NOT NULL,
+    prompt_version VARCHAR(16) NOT NULL,
+    title TEXT NOT NULL,
+    summary JSON NOT NULL,
+    created_at DATETIME NOT NULL,
+    PRIMARY KEY (key)
+);
+CREATE TABLE mindmaps (
+    key VARCHAR(64) NOT NULL,
+    model VARCHAR(128) NOT NULL,
+    prompt_version VARCHAR(16) NOT NULL,
+    title TEXT NOT NULL,
+    mindmap JSON NOT NULL,
+    created_at DATETIME NOT NULL,
+    PRIMARY KEY (key)
+);
+"""
+
+
+def _make_legacy_artifact_tables() -> None:
+    """在已对齐的库上造两张旧缓存表，各塞一行数据。"""
+    conn = sqlite3.connect(_DB_PATH)
+    try:
+        conn.executescript(_LEGACY_ARTIFACT_DDL)
+        now = "2026-01-01 00:00:00"
+        conn.execute(
+            "INSERT INTO summaries (key, model, prompt_version, title, summary, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            ("s" * 64, "deepseek · deepseek-chat", "v1", "旧总结标题",
+             '{"one_line": "旧结论", "keywords": ["旧关键词"]}', now),
+        )
+        conn.execute(
+            "INSERT INTO mindmaps (key, model, prompt_version, title, mindmap, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            ("m" * 64, "deepseek · deepseek-chat", "v1", "旧导图标题",
+             '{"title": "旧导图", "children": [{"title": "旧分支", "children": []}]}', now),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _legacy_tables_remaining() -> list[str]:
+    conn = sqlite3.connect(_DB_PATH)
+    try:
+        return sorted(
+            r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+                " AND name IN ('summaries', 'mindmaps')"
+            ).fetchall()
+        )
+    finally:
+        conn.close()
+
+
+def test_ai_artifact_merge_from_legacy_tables():
+    """旧 summaries/mindmaps → ai_artifacts：并入 + 删旧表 + payload 原样 + 幂等。"""
+    from backend import storage
+    from backend.storage import migrations, models
+
+    _make_legacy_artifact_tables()
+    actions = migrations.ensure_schema()
+    assert any("summaries -> ai_artifacts" in a for a in actions), actions
+    assert any("mindmaps -> ai_artifacts" in a for a in actions), actions
+    assert _legacy_tables_remaining() == [], "旧表应已删除"
+
+    # 数据并入 ai_artifacts：payload 原样保留，kind 正确（业务寻址走 (kind,key) 唯一索引）
+    from sqlalchemy import select as _select
+
+    with storage.session() as s:
+        row = s.scalar(_select(models.AiArtifact).where(
+            models.AiArtifact.kind == "summary", models.AiArtifact.key == "s" * 64))
+        assert row is not None, "旧 summaries 行未并入"
+        assert row.title == "旧总结标题"
+        assert row.payload["one_line"] == "旧结论"
+        assert row.payload["keywords"] == ["旧关键词"]
+        row = s.scalar(_select(models.AiArtifact).where(
+            models.AiArtifact.kind == "mindmap", models.AiArtifact.key == "m" * 64))
+        assert row is not None, "旧 mindmaps 行未并入"
+        assert row.payload["title"] == "旧导图"
+        assert row.payload["children"][0]["title"] == "旧分支"
+
+    # 二次执行：旧表已不存在，无任何动作（幂等）
+    assert migrations.ensure_schema() == []
+    print("[mig] ai_artifacts 合并旧 summaries/mindmaps 并删旧表 ok")
+
+
+# 加自增 id 之前的旧 transcripts 结构（业务键 key 为主键，无 id 列）
+_LEGACY_TRANSCRIPTS_DDL = """
+CREATE TABLE transcripts (
+    key VARCHAR(64) NOT NULL,
+    url TEXT NOT NULL,
+    normalized_url TEXT NOT NULL,
+    title TEXT NOT NULL,
+    source VARCHAR(16) NOT NULL,
+    language VARCHAR(32) NOT NULL,
+    language_name VARCHAR(64) NOT NULL,
+    char_count INTEGER NOT NULL,
+    segments JSON NOT NULL,
+    text TEXT NOT NULL,
+    asr_provider VARCHAR(64),
+    webpage_url TEXT,
+    created_at DATETIME NOT NULL,
+    PRIMARY KEY (key)
+);
+"""
+
+
+# 加自增 id 之前的旧 video_infos 结构（业务键 key 为主键，无 id 列）
+_LEGACY_VIDEO_INFOS_DDL = """
+CREATE TABLE video_infos (
+    key VARCHAR(64) NOT NULL,
+    url TEXT NOT NULL,
+    normalized_url TEXT NOT NULL,
+    payload JSON NOT NULL,
+    created_at DATETIME NOT NULL,
+    PRIMARY KEY (key)
+);
+"""
+
+
+def _make_legacy_transcripts() -> None:
+    """把已对齐的 transcripts 表替换为旧结构（无 id），塞两行数据。"""
+    from sqlalchemy import text
+
+    from backend.storage import db as sdb
+
+    with sdb.engine.begin() as conn:
+        conn.execute(text("DROP TABLE transcripts"))
+        conn.execute(text(_LEGACY_TRANSCRIPTS_DDL))
+        now = "2026-01-01 00:00:00"
+        conn.execute(
+            text("INSERT INTO transcripts (key, url, normalized_url, title, source, language,"
+                 " language_name, char_count, segments, text, created_at)"
+                 " VALUES (:k, :u, :n, :t, 'auto', 'zh', '自动字幕', 4, '[]', :x, :c)"),
+            [
+                {"k": "t" * 64, "u": "https://a/1", "n": "https://a/1", "t": "旧视频一",
+                 "x": "字幕一", "c": now},
+                {"k": "u" * 64, "u": "https://a/2", "n": "https://a/2", "t": "旧视频二",
+                 "x": "字幕二", "c": now},
+            ],
+        )
+
+
+def _make_legacy_video_infos() -> None:
+    """把已对齐的 video_infos 表替换为旧结构（无 id、key 为主键），塞一行未过期数据。"""
+    from datetime import datetime, timezone
+
+    from sqlalchemy import text
+
+    from backend.storage import db as sdb
+
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")
+    with sdb.engine.begin() as conn:
+        conn.execute(text("DROP TABLE video_infos"))
+        conn.execute(text(_LEGACY_VIDEO_INFOS_DDL))
+        conn.execute(
+            text("INSERT INTO video_infos (key, url, normalized_url, payload, created_at)"
+                 " VALUES (:k, :u, :n, :p, :c)"),
+            {"k": "v" * 64, "u": "https://a/1", "n": "https://a/1",
+             "p": '{"title": "旧信息", "formats": []}', "c": now},
+        )
+
+
+def test_surrogate_id_migration():
+    """旧结构缓存表（无 id，业务键为主键）→ 自增代理主键迁移：数据保留、唯一性转约束。"""
+    from sqlalchemy import select
+    from sqlalchemy.exc import IntegrityError
+
+    from backend import storage
+    from backend.storage import migrations, models
+
+    _make_legacy_transcripts()
+    actions = migrations.ensure_schema()
+    assert any("transcripts: rebuilt" in a for a in actions), actions
+
+    # 数据零丢失，id 自动回填且为新的代理主键
+    with storage.session() as s:
+        rows = s.scalars(select(models.Transcript).order_by(models.Transcript.id)).all()
+        assert [(r.id, r.title, r.text) for r in rows] == [
+            (1, "旧视频一", "字幕一"), (2, "旧视频二", "字幕二"),
+        ], [(r.id, r.title) for r in rows]
+
+    # 旧主键（业务键）降级为唯一约束：重复 key 必须被拒（唯一性静默失效是最危险的回归）
+    try:
+        with storage.session() as s:
+            s.add(models.Transcript(key="t" * 64, url="x", text="重复键"))
+        assert False, "重复业务键应被唯一约束拒绝"
+    except IntegrityError:
+        pass
+
+    # 主键结构：PK 应为 id，且存在业务键唯一索引
+    insp = __import__("sqlalchemy").inspect(storage.migrations.engine)
+    pk_cols = insp.get_pk_constraint("transcripts")["constrained_columns"]
+    assert pk_cols == ["id"], pk_cols
+    # SQLAlchemy 的 SQLite 方言 get_indexes 不含内联 UNIQUE 生成的 sqlite_autoindex_*；
+    # 业务键唯一性改用 get_unique_constraints 验证（唯一性本身已由上面的重复键拒绝证明）。
+    uc_cols = {tuple(uc["column_names"]) for uc in insp.get_unique_constraints("transcripts")}
+    assert ("key",) in uc_cols, uc_cols
+    print("[mig] transcripts 加自增主键 id、业务键转唯一约束 ok")
+
+    # video_infos 同模式对齐：重建加 id、payload 保留、repo 经业务键仍能命中（未过期）
+    _make_legacy_video_infos()
+    actions = migrations.ensure_schema()
+    assert any("video_infos: rebuilt" in a for a in actions), actions
+    with storage.session() as s:
+        row = s.scalar(select(models.VideoInfo).where(models.VideoInfo.key == "v" * 64))
+        assert row is not None and row.id == 1, row
+        assert row.payload["title"] == "旧信息"
+    insp2 = __import__("sqlalchemy").inspect(storage.migrations.engine)  # 重建后重新反射，避开缓存
+    assert insp2.get_pk_constraint("video_infos")["constrained_columns"] == ["id"]
+    uc_cols = {tuple(uc["column_names"]) for uc in insp2.get_unique_constraints("video_infos")}
+    assert ("key",) in uc_cols, uc_cols
+    from backend.storage import repo
+
+    assert repo.get_info("v" * 64)["title"] == "旧信息"   # _by_key 读路径命中
+    print("[mig] video_infos 加自增主键 id、业务键转唯一约束、repo 命中 ok")
+
+
 def test_migration_is_idempotent():
     from backend.storage import migrations
 
@@ -203,6 +430,8 @@ if __name__ == "__main__":
         test_ensure_schema_aligns_structure()
         test_data_preserved_and_fixup_applied()
         test_multiple_null_emails_coexist()
+        test_ai_artifact_merge_from_legacy_tables()
+        test_surrogate_id_migration()
         test_migration_is_idempotent()
         print("MIGRATION TEST PASSED")
     finally:

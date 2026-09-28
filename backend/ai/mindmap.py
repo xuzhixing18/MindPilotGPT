@@ -156,7 +156,7 @@ def build_mindmap(
     model_label = f"{cfg.label} · {cfg.model}"
     key = storage.mindmap_key(text, model_label, PROMPT_VERSION)
     if not refresh:
-        hit = storage.repo.get_mindmap(key)
+        hit = storage.repo.get_artifact(storage.repo.ARTIFACT_MINDMAP, key)
         if hit is not None:
             hit["cached"] = True
             return hit
@@ -164,7 +164,7 @@ def build_mindmap(
     def _do() -> dict[str, Any]:
         # 双重检查：拿到 single-flight 锁后再查一次，避免并发重复调用 LLM
         if not refresh:
-            hit = storage.repo.get_mindmap(key)
+            hit = storage.repo.get_artifact(storage.repo.ARTIFACT_MINDMAP, key)
             if hit is not None:
                 hit["cached"] = True
                 return hit
@@ -191,8 +191,9 @@ def build_mindmap(
             "truncated": truncated,
             "cached": False,
         }
-        storage.repo.put_mindmap(
-            key, result, model=model_label, prompt_version=PROMPT_VERSION, title=title
+        storage.repo.put_artifact(
+            storage.repo.ARTIFACT_MINDMAP, key, result,
+            model=model_label, prompt_version=PROMPT_VERSION, title=title,
         )
         return result
 
