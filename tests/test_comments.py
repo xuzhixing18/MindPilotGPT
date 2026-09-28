@@ -6,6 +6,8 @@
 - 门面         ：monkeypatch 假平台模块后，fetch_comments 首次计算并落库、再命中缓存（cached=True
                 且不再调用底层）、refresh=True 强制重算；空评论抛 CommentsNotSupportedError
 - 抖音         ：响应分类——签名网关(5/-99999/非JSON)/真无评论 → NotSupported；正常 → 归一化
+- B 站         ：风控码(-352) → CommentsError（不伪装 NotSupported）且换指纹重试一次；
+                正常 → top_replies/replies 合并去重归一化；code=0 无评论 → 空列表
 
 运行：python tests/test_comments.py
 """
@@ -200,6 +202,72 @@ def test_douyin_classification():
     print("[douyin] response classification ok")
 
 
+def test_bilibili_classification():
+    """B 站响应分类：风控码 → CommentsError（不伪装 NotSupported）且换指纹重试；
+    正常 → top_replies/replies 合并去重归一化；code=0 无评论 → 空列表。"""
+    from backend.comments import bilibili as bl
+
+    old_get = bl._get_json
+    old_wbi = bl._wbi_cache
+    calls = {"reply": 0}
+    routes: dict = {}
+
+    def _reply_ok():
+        return {"code": 0, "message": "OK", "data": {
+            "top_replies": [
+                {"rpid": 1, "content": {"message": "置顶高赞"}, "member": {"uname": "top"}, "like": 900, "ctime": 1},
+            ],
+            "replies": [
+                {"rpid": 1, "content": {"message": "置顶高赞"}, "member": {"uname": "top"}, "like": 900, "ctime": 1},  # 与置顶重复应去重
+                {"rpid": 2, "content": {"message": "  "}, "member": {"uname": "x"}, "like": 5},  # 空文本过滤
+                {"rpid": 3, "content": {"message": "普通"}, "like": 7, "ctime": 3},  # 缺 member → 匿名
+            ],
+        }}
+
+    def fake_get(url, params=None):
+        if "web-interface/view" in url:
+            return {"code": 0, "data": {"aid": 123, "title": "t"}}
+        if "web-interface/nav" in url:
+            return {"code": -101, "data": {"wbi_img": {
+                "img_url": "https://x/" + "a1" * 16 + ".png",
+                "sub_url": "https://x/" + "b2" * 16 + ".png"}}}
+        if "reply/wbi/main" in url or "reply/main" in url:
+            calls["reply"] += 1
+            return routes["reply"]()
+        return {"code": 0, "data": {}}
+
+    url = "https://www.bilibili.com/video/BV1ECFQevEUf"
+    try:
+        bl._get_json = fake_get
+        # A) 新旧端点均被风控 → CommentsError，且换指纹自动重试一轮（2 轮 × 2 端点 = 4 次）
+        routes["reply"] = lambda: {"code": -352, "message": "-352", "data": {}}
+        calls["reply"] = 0
+        raised = None
+        try:
+            bl.fetch(url, 10)
+        except comments.CommentsNotSupportedError:
+            raised = "not_supported"
+        except comments.CommentsError:
+            raised = "error"
+        assert raised == "error", "风控码应抛 CommentsError，不得伪装成 NotSupported"
+        assert calls["reply"] == 4, f"命中风控应换指纹重试一轮（4 次请求），实际 {calls['reply']}"
+
+        # B) 正常响应 → top_replies/replies 合并去重归一化
+        routes["reply"] = _reply_ok
+        out = bl.fetch(url, 10)
+        assert [c["text"] for c in out["comments"]] == ["置顶高赞", "普通"]
+        assert out["comments"][0]["author"] == "top"
+        assert out["comments"][1]["author"] == "匿名" and out["comments"][1]["likes"] == 7
+
+        # C) code=0 但确无评论 → 空列表（由门面统一判 NotSupported）
+        routes["reply"] = lambda: {"code": 0, "message": "OK", "data": {"replies": []}}
+        assert bl.fetch(url, 10)["comments"] == []
+    finally:
+        bl._get_json = old_get
+        bl._wbi_cache = old_wbi
+    print("[bilibili] response classification ok")
+
+
 if __name__ == "__main__":
     test_top_comments()
     test_repo_roundtrip()
@@ -208,4 +276,5 @@ if __name__ == "__main__":
     test_not_supported()
     test_routing()
     test_douyin_classification()
+    test_bilibili_classification()
     print("COMMENTS TEST PASSED")
