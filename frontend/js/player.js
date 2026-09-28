@@ -1,10 +1,12 @@
-/* 嵌入播放器适配层：为字幕 Tab 提供统一的 seek / 进度回读能力。
+/* 播放器适配层：为左栏封面槽提供统一的 seek / 进度回读能力。
  *
  * - B站：官方外链播放器 player.bilibili.com/player.html，官方支持 ``t`` 参数（秒）
  *   指定初始播放时间点，故 seek = 带 t 参数重载 iframe 并 autoplay；但**无进度回读
  *   API**，canFollow=false（字幕滚动联动不可用，点击时间戳跳转正常）；
  * - YouTube：IFrame API（enablejsapi=1），seekTo / getCurrentTime 全支持，canFollow=true；
- * - 其他平台（抖音等）：detectPlayer 返回 null，调用方降级为「仅字幕内定位」。
+ * - 其他平台（抖音等，detectPlayer 返回 null）：无官方嵌入播放器且被 CSP 禁止 iframe
+ *   嵌入，改用 mountNative：后端 /api/stream 流式代理 + HTML5 <video> 原生播放，
+ *   seek / 进度回读全支持，canFollow=true（体验反而优于外链播放器）。
  *
  * 控制器接口：{ platform, canFollow, seek(sec), getTime(), destroy() }
  * getTime() 在不支持回读时返回 null。
@@ -118,4 +120,40 @@ export const createPlayer = async (box, target, opts = {}) => {
     return null;   // 挂载失败（如 YT API 被墙）：降级为无播放器
   }
   return null;
+};
+
+/* HTML5 原生播放器（抖音等无外链播放器平台）：src 指向后端 /api/stream 流式代理。
+ * 同步挂载立即返回控制器（el = video 元素，供调用方监听 loadeddata/error 控制遮罩）；
+ * 首次播放需等服务端拉取完整视频，期间 video 展示 poster 封面。
+ * opts: { src, poster, sec, autoplay } */
+export const mountNative = (box, opts = {}) => {
+  if (!box || !opts.src) return null;
+  const v = document.createElement('video');
+  v.className = 'h-full w-full bg-black object-contain';
+  v.controls = true;
+  v.playsInline = true;
+  v.preload = 'auto';
+  if (opts.poster) v.poster = opts.poster;
+  v.src = opts.src;
+  box.appendChild(v);
+  const safeSeek = (sec) => {
+    try { v.currentTime = Math.max(0, sec); } catch (e) { /* 元数据未就绪 */ }
+  };
+  if (opts.sec) v.addEventListener('loadedmetadata', () => safeSeek(opts.sec), { once: true });
+  if (opts.autoplay) {
+    const play = () => { const p = v.play(); if (p && p.catch) p.catch(() => {}); };
+    v.addEventListener('canplay', play, { once: true });
+    play();   // 点击手势链路内直接尝试，不等缓冲
+  }
+  return {
+    platform: 'native',
+    canFollow: true,   // 原生元素完整回读 currentTime：滚动联动可用
+    el: v,
+    seek: (sec) => { safeSeek(sec); const p = v.play(); if (p && p.catch) p.catch(() => {}); },
+    getTime: () => (v.readyState >= 1 && Number.isFinite(v.currentTime) ? v.currentTime : null),
+    destroy: () => {
+      try { v.pause(); v.removeAttribute('src'); v.load(); } catch (e) { /* 已销毁 */ }
+      v.remove();
+    },
+  };
 };

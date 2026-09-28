@@ -8,20 +8,22 @@ import {
   state, escapeHtml, fmtDuration, fmtSize, fmtCount, fmtTs, fmtDate,
   postJson, dedup, markUnauthorized,
   txCache, sumCache, mindmapCache, commentsCache, qaCache,
-  triggerDownload, buildSubtitleText, downloadText, buildMindmapMarkdown, exportMindmapPng,
+  triggerDownload, buildSubtitleText, downloadText, downloadBlob, copyText, buildMindmapMarkdown,
+  downloadSvg, downloadSvgPng,
   ICON, AI_CONFIG_HINT,
 } from '../core.js';
 import { addToCollection } from '../coll-picker.js';
-import { createPlayer, detectPlayer } from '../player.js';
+import { createPlayer, detectPlayer, mountNative } from '../player.js';
 
 /* ---------- 左栏封面播放器：模块级共享控制器（字幕 Tab 联动） ----------
  * 播放器不再内嵌在字幕 Tab 内部，而是在左栏封面区原位挂载：封面默认展示
- * 海报 + 播放按钮，点击后 createPlayer 原位替换为 iframe；字幕时间戳 / 章节
- * 点击时若播放器尚未挂载，则先按对应时间点挂载（自动播放）。控制器模块级
- * 唯一，换卡时销毁旧实例；字幕面板通过 onPlayer 订阅保持同步。
+ * 海报 + 播放按钮，点击后原位替换为播放器（B站/YouTube 用外链嵌入，抖音等
+ * 无嵌入播放器的平台走后端 /api/stream 流式代理 + <video> 原生播放）；字幕
+ * 时间戳 / 章节点击时若播放器尚未挂载，则先按对应时间点挂载（自动播放）。
+ * 控制器模块级唯一，换卡时销毁旧实例；字幕面板通过 onPlayer 订阅保持同步。
  */
 let playerCtrl = null;
-let playerSlot = null;   // { el, target, posterHtml }：当前卡左栏封面槽位
+let playerSlot = null;   // { el, target, url, posterUrl, posterHtml }：当前卡左栏封面槽位
 const playerSubs = new Set();
 const onPlayer = (fn) => { playerSubs.add(fn); return () => playerSubs.delete(fn); };
 const setPlayerCtrl = (ctrl) => {
@@ -30,20 +32,39 @@ const setPlayerCtrl = (ctrl) => {
   playerSubs.forEach((fn) => fn(ctrl));
 };
 /* 在左栏封面槽挂载播放器（sec=起播秒）；已挂载则直接 seek；失败恢复封面可重试。
- * spinner 以 absolute 覆盖层展示：createPlayer 是 appendChild 追加 iframe，
- * 若提前写入普通流的 spinner 会占满容器把 iframe 挤出可视区（aspect-video
- * 固定高 + overflow-hidden），导致播放器被永远挡住。 */
+ * spinner 以 absolute 覆盖层展示：挂载是 appendChild 追加内容，若提前写入普通流
+ * 的 spinner 会占满容器把播放器挤出可视区（aspect-video 固定高 + overflow-hidden）。 */
 const mountLeftPlayer = async (sec) => {
   if (playerCtrl) { playerCtrl.seek(sec); return playerCtrl; }
   const slot = playerSlot;
   if (!slot || !slot.el.isConnected) return null;
   const spin = document.createElement('div');
   spin.className = 'absolute inset-0 z-10 grid place-items-center bg-slate-100/95 text-xs text-slate-400';
-  spin.innerHTML = '<span class="inline-flex items-center gap-2"><span class="spinner"></span> 播放器加载中…</span>';
-  slot.el.innerHTML = '';   // 清掉海报/时长角标/播放按钮：它们都是 h-full，不清会把 iframe 挤出容器
+  spin.innerHTML = `<span class="inline-flex items-center gap-2"><span class="spinner"></span> ${slot.target ? '播放器加载中…' : '视频源获取中…'}</span>`;
+  slot.el.innerHTML = '';   // 清掉海报/时长角标/播放按钮：它们都是 h-full，不清会把播放器挤出容器
   slot.el.appendChild(spin);
-  const ctrl = await createPlayer(slot.el, slot.target, { sec, autoplay: true });
-  spin.remove();
+  const hideSpin = () => spin.remove();
+  let ctrl = null;
+  if (slot.target) {
+    ctrl = await createPlayer(slot.el, slot.target, { sec, autoplay: true });
+    hideSpin();
+  } else {
+    // 无外链嵌入播放器（抖音等）：后端流式代理 + HTML5 原生播放；
+    // 首次拉取需等服务端完整下载视频，遮罩保留到缓冲就绪（poster 兼做封面展示）
+    ctrl = mountNative(slot.el, {
+      src: `/api/stream?url=${encodeURIComponent(slot.url)}`,
+      poster: slot.posterUrl, sec, autoplay: true,
+    });
+    if (ctrl) {
+      ctrl.el.addEventListener('loadeddata', hideSpin, { once: true });
+      ctrl.el.addEventListener('error', () => {
+        hideSpin();
+        if (playerCtrl === ctrl) setPlayerCtrl(null);
+        try { ctrl.destroy(); } catch (e) { /* 已销毁 */ }
+        if (slot.el.isConnected) slot.el.innerHTML = slot.posterHtml;   // 拉取失败：恢复封面可重试
+      }, { once: true });
+    }
+  }
   if (!slot.el.isConnected) { if (ctrl) ctrl.destroy(); return null; }
   if (ctrl) { setPlayerCtrl(ctrl); return ctrl; }
   slot.el.innerHTML = slot.posterHtml;   // 挂载失败：恢复封面，可重试
@@ -115,17 +136,14 @@ const renderCard = (info, url, opts = {}) => {
         </button>`).join('')
     : '<div class="rounded-xl border border-dashed border-slate-200 p-4 text-center text-sm text-slate-400">无可用清晰度</div>';
 
-  const playerTarget = detectPlayer(url);
-
   const headHtml = `
           <div class="p-4">
             <div class="player-slot relative aspect-video w-full overflow-hidden rounded-2xl bg-slate-100">
               ${thumb}
               ${info.duration ? `<span class="absolute bottom-2 right-2 rounded bg-black/70 px-1.5 py-0.5 text-xs text-white">${fmtDuration(info.duration)}</span>` : ''}
-              ${playerTarget ? `
-              <button type="button" class="player-play absolute inset-0 grid place-items-center transition hover:bg-black/25" title="在页面内播放视频（与字幕时间戳联动）">
+              <button type="button" class="player-play absolute inset-0 grid place-items-center transition hover:bg-black/25" title="在页面内播放视频（与字幕时间戳联动；抖音等无嵌入播放器的平台由服务端流式在线播放）">
                 <span class="grid h-12 w-12 place-items-center rounded-full bg-white/90 text-brand-600 shadow-card transition hover:scale-105">${ICON.play}</span>
-              </button>` : ''}
+              </button>
             </div>
             <h3 class="mt-3 line-clamp-2 text-base font-bold leading-snug text-slate-900" title="${escapeHtml(info.title)}">${escapeHtml(info.title)}</h3>
             ${metaBits ? `<div class="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">${metaBits}</div>` : ''}
@@ -329,7 +347,7 @@ const renderTranscript = async (panel, data, url) => {
     listEl.innerHTML = groups.map((g, gi) => {
       const t = g[0].start;
       const hasTs = t != null;
-      const tsTitle = !hasTs ? '该段无时间戳' : (ctrl ? '跳转播放并定位到该段' : (target ? '在左栏打开播放器并跳转到该段' : '定位到该段'));
+      const tsTitle = !hasTs ? '该段无时间戳' : (ctrl ? '跳转播放并定位到该段' : ((target || playerSlot) ? '在左栏打开播放器并跳转到该段' : '定位到该段'));
       return `
       <div class="sub-row flex gap-3 rounded-xl border px-3 py-2.5 transition ${gi === st.activeGi ? 'sub-active' : ''}" data-gi="${gi}" data-start="${hasTs ? t : ''}">
         <button type="button" class="sub-ts shrink-0 font-mono text-sm font-semibold text-sky-500 transition hover:underline ${hasTs ? '' : 'cursor-default opacity-50'}" data-t="${hasTs ? t : ''}" title="${tsTitle}">${hasTs ? fmtTs(t) : '—'}</button>
@@ -397,7 +415,7 @@ const renderTranscript = async (panel, data, url) => {
     const c = chapters[Number(chip.dataset.i)];
     if (!c) return;
     if (ctrl) ctrl.seek(c.start);
-    else if (target) await mountLeftPlayer(c.start);
+    else if (playerSlot) await mountLeftPlayer(c.start);
     chipsEl.querySelectorAll('.sub-chip').forEach((x) => x.classList.toggle('sub-chip-on', x === chip));
     const rows = Array.from(listEl.querySelectorAll('.sub-row')).filter((r) => r.dataset.start !== '');
     const row = rows.find((r) => Number(r.dataset.start) >= c.start - 0.5) || rows[rows.length - 1];
@@ -425,7 +443,7 @@ const renderTranscript = async (panel, data, url) => {
     if (!ts || ts.dataset.t === '') return;
     const t = Number(ts.dataset.t);
     if (ctrl) ctrl.seek(t);
-    else if (target) await mountLeftPlayer(t);
+    else if (playerSlot) await mountLeftPlayer(t);
     const row = ts.closest('.sub-row');
     setActiveRow(row ? Number(row.dataset.gi) : -1, false);
   });
@@ -475,65 +493,317 @@ const renderTranscript = async (panel, data, url) => {
 
   paintList();
 
-  /* 滚动联动可用性由平台能力决定：B站外链播放器无进度回读；无嵌入播放器平台仅字幕内定位；
-   * YouTube 未挂载时轮询自动空转，封面挂载后经订阅回调恢复联动 */
-  if (!target || target.platform !== 'youtube') {
-    disableFollow(target && target.platform === 'bilibili'
-      ? 'B站外链播放器不回读播放进度，滚动联动不可用；点击时间戳跳转正常'
-      : '该平台无可嵌入播放器：时间戳仅用于字幕内定位');
+  /* 滚动联动可用性由播放器能力决定：B站外链播放器无进度回读，禁用；
+   * YouTube / 原生流式播放（抖音等）可回读，未挂载时轮询空转，封面挂载后经订阅回调恢复联动 */
+  if (target && target.platform === 'bilibili') {
+    disableFollow('B站外链播放器不回读播放进度，滚动联动不可用；点击时间戳跳转正常');
   }
 };
 
-/* ---------- 思维导图渲染（无第三方库，CSS 缩进树，递归） ---------- */
-const mmNode = (n) => {
-  const kids = n.children || [];
-  const kidsHtml = kids.length
-    ? `<div class="mt-1.5 space-y-1.5 border-l border-slate-200 pl-3 sm:pl-4">${kids.map(mmNode).join('')}</div>`
-    : '';
-  return `<div class="mt-1.5">
-      <span class="inline-block rounded-lg bg-slate-100 px-2.5 py-1 text-sm leading-snug text-slate-700">${escapeHtml(n.title || '')}</span>
-      ${kidsHtml}
-    </div>`;
+/* ---------- 思维导图 SVG 画布：横向径向树 + 折叠/缩放 + 章节跳播 ----------
+ * 无第三方库：canvas ctx 测量文本宽 → 变高横向 tidy 布局 → SVG 渲染。
+ * 交互：滚轮缩放、拖拽平移、点节点折叠/展开、点章节时间戳节点跳播（复用左栏共享播放器控制器）；
+ * 导出：视图序列化（导出时全展开）为 .svg / 光栅化 .png；.xmind 走后端 zipfile 打包。
+ */
+const MM_COLORS = ['#1677FF', '#F59E0B', '#10B981', '#8B5CF6', '#EC4899', '#0EA5E9', '#F43F5E', '#84CC16'];
+const MM_FONT_ATTR = 'font-family="-apple-system, \'PingFang SC\', \'Microsoft YaHei\', sans-serif"';
+const MM_FONT = '14px -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif';
+const MM_BADGE_FONT = '700 11px ui-monospace, Consolas, monospace';
+const MM_LINE_H = 20, MM_PAD_X = 12, MM_PAD_Y = 8, MM_MAX_W = 240, MM_GAP_Y = 12, MM_GAP_X = 52;
+const mmCtx = document.createElement('canvas').getContext('2d');
+
+// 按显示宽度折行（逐字累加，中文/emoji 天然可断）
+const mmWrap = (text, maxW) => {
+  mmCtx.font = MM_FONT;
+  const lines = [];
+  let cur = '';
+  for (const ch of String(text)) {
+    if (cur && mmCtx.measureText(cur + ch).width > maxW) { lines.push(cur); cur = ch; } else cur += ch;
+  }
+  if (cur) lines.push(cur);
+  return lines.length ? lines : [''];
 };
 
-const renderMindmap = (panel, data) => {
+/* 布局：测量节点盒 → 列宽（尊重折叠态）→ 后序排 y（叶子顺排、父节点居中对齐） */
+const mmLayout = (root, expandAll) => {
+  const prep = (n, depth, color, style) => {
+    n.depth = depth; n.color = color; n.style = style;
+    n.badge = n.start != null ? fmtTs(n.start) : '';   // 章节时间线节点的时间戳徽标
+    n.lines = mmWrap(n.title || '', MM_MAX_W);
+    mmCtx.font = MM_FONT;
+    const textW = Math.max(...n.lines.map((l) => mmCtx.measureText(l).width));
+    mmCtx.font = MM_BADGE_FONT;
+    n.badgeW = n.badge ? Math.ceil(mmCtx.measureText(n.badge).width) + 14 : 0;
+    n.w = Math.ceil(textW) + MM_PAD_X * 2 + n.badgeW;
+    n.h = n.lines.length * MM_LINE_H + MM_PAD_Y * 2;
+    n.subCount = 0;
+    (n.children || []).forEach((k, i) => {
+      // 一级分区语义：思考问题 → 编号蓝链样式；内容标签 → hashtag 样式（子节点继承）
+      const kStyle = depth === 0
+        ? (/思考|问题/.test(k.title || '') ? 'q' : (/标签|话题/.test(k.title || '') ? 't' : ''))
+        : style;
+      prep(k, depth + 1, depth === 0 ? MM_COLORS[i % MM_COLORS.length] : color, kStyle);
+      n.subCount += 1 + k.subCount;
+    });
+  };
+  prep(root, 0, MM_COLORS[0], '');
+  const colW = [];
+  const walkW = (n) => {
+    colW[n.depth] = Math.max(colW[n.depth] || 0, n.w);
+    if (expandAll || !n.collapsed) (n.children || []).forEach(walkW);
+  };
+  walkW(root);
+  const colX = [];
+  let acc = 0;
+  colW.forEach((w, d) => { colX[d] = acc; acc += w + MM_GAP_X; });
+  let cursor = 0;
+  const place = (n) => {
+    n.x = colX[n.depth] || 0;
+    const kids = expandAll || !n.collapsed ? (n.children || []) : [];
+    if (!kids.length) { n.y = cursor; cursor += n.h + MM_GAP_Y; return; }
+    kids.forEach(place);
+    const lastK = kids[kids.length - 1];
+    n.y = (kids[0].y + lastK.y + lastK.h) / 2 - n.h / 2;
+  };
+  place(root);
+  let w = 0, h = 0;
+  const walkB = (n) => {
+    w = Math.max(w, n.x + n.w); h = Math.max(h, n.y + n.h);
+    if (expandAll || !n.collapsed) (n.children || []).forEach(walkB);
+  };
+  walkB(root);
+  return { w: w + 14, h: h + 4 };   // 预留折叠圆点溢出宽度
+};
+
+/* 单个节点 SVG：圆角盒 + 时间戳徽标 + 多行文本 + 折叠圆点（收起时显示隐藏子树数） */
+const mmNodeSvg = (n, idx, expandAll) => {
+  const isRoot = n.depth === 0;
+  const fill = isRoot ? '#1677FF' : (n.start != null ? '#EFF6FF' : '#FFFFFF');
+  const stroke = isRoot ? '#1677FF' : n.color;
+  const tFill = isRoot ? '#FFFFFF' : n.style === 'q' ? '#0369A1' : n.style === 't' ? '#DB2777' : '#334155';
+  const tx = MM_PAD_X + n.badgeW;
+  const linesSvg = n.lines.map((l, i) =>
+    `<text x="${tx}" y="${MM_PAD_Y + i * MM_LINE_H + MM_LINE_H / 2}" dominant-baseline="central" font-size="14" font-weight="${isRoot ? 700 : n.depth === 1 ? 600 : 400}" fill="${tFill}" ${MM_FONT_ATTR}>${escapeHtml(l)}</text>`).join('');
+  const badgeSvg = n.badge
+    ? `<rect width="${n.badgeW}" height="${n.h}" rx="8" fill="#1677FF"/><text x="${n.badgeW / 2}" y="${n.h / 2}" text-anchor="middle" dominant-baseline="central" font-size="11" font-weight="700" fill="#FFFFFF" ${MM_FONT_ATTR}>${escapeHtml(n.badge)}</text>`
+    : '';
+  const hasKids = (n.children || []).length > 0;
+  let toggleSvg = '';
+  if (hasKids && !expandAll) {
+    toggleSvg = n.collapsed
+      ? `<circle cx="${n.w}" cy="${n.h / 2}" r="8" fill="#FFFFFF" stroke="${stroke}" stroke-width="1.5"/><text x="${n.w}" y="${n.h / 2 + 0.5}" text-anchor="middle" dominant-baseline="central" font-size="9" font-weight="700" fill="${stroke}" ${MM_FONT_ATTR}>${n.subCount}</text>`
+      : `<circle cx="${n.w}" cy="${n.h / 2}" r="7" fill="#FFFFFF" stroke="${stroke}" stroke-width="1.5"/><path d="M${n.w - 3},${n.h / 2} h6" stroke="${stroke}" stroke-width="1.5"/>`;
+  }
+  const clickable = hasKids || n.start != null;
+  const titleSvg = n.note ? `<title>${escapeHtml(n.note)}</title>` : '';
+  return `<g class="mm-node" data-i="${idx}" transform="translate(${n.x},${n.y})" style="cursor:${clickable ? 'pointer' : 'default'}">${titleSvg}<rect width="${n.w}" height="${n.h}" rx="10" fill="${fill}" stroke="${stroke}" stroke-width="${isRoot ? 0 : 1.2}"/>${badgeSvg}${linesSvg}${toggleSvg}</g>`;
+};
+
+/* 生成 SVG 内容（贝塞尔连接线 + 节点组）；nodesArr 与 data-i 对应供事件委托 */
+const mmMarkup = (root, expandAll) => {
+  const bounds = mmLayout(root, expandAll);
+  const edges = [];
+  const nodesArr = [];
+  const walk = (n) => {
+    const kids = expandAll || !n.collapsed ? (n.children || []) : [];
+    const px = n.x + n.w, py = n.y + n.h / 2;
+    kids.forEach((k) => {
+      const ky = k.y + k.h / 2, mx = (px + k.x) / 2;
+      edges.push(`<path d="M${px},${py} C${mx},${py} ${mx},${ky} ${k.x},${ky}" fill="none" stroke="${k.color}" stroke-width="1.6" opacity="0.7"/>`);
+      walk(k);
+    });
+    nodesArr.push(n);
+  };
+  walk(root);
+  return { inner: edges.join('') + nodesArr.map((n, i) => mmNodeSvg(n, i, expandAll)).join(''), bounds, nodesArr };
+};
+
+// 导出用完整 SVG 文档（全展开 + 白底 + 留白）
+const mmExportDoc = (mm) => {
+  const { inner, bounds } = mmMarkup(mm, true);
+  const w = Math.ceil(bounds.w) + 48, h = Math.ceil(bounds.h) + 48;
+  return {
+    markup: `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="-24 -24 ${w} ${h}"><rect x="-24" y="-24" width="${w}" height="${h}" fill="#FFFFFF"/>${inner}</svg>`,
+    w, h,
+  };
+};
+
+const MM_ICON_REFRESH = '<svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 11-2.6-6.4M21 3v6h-6"/></svg>';
+const MM_ICON_FIT = '<svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>';
+
+const renderMindmap = (panel, data, url) => {
   const mm = data.mindmap || {};
-  const kids = mm.children || [];
+  // 平台章节注入为「章节时间线」分支（时间戳节点可点击跳播；与后端 xmind 导出同构）
+  const chapters = (data.chapters || []).filter((c) => c && c.title && c.start != null);
+  if (chapters.length && !(mm.children || []).some((b) => (b.title || '').includes('章节时间线'))) {
+    mm.children = [...(mm.children || []), {
+      title: '章节时间线',
+      children: chapters.map((c) => ({ title: String(c.title).trim(), children: [], start: Number(c.start) })),
+    }];
+  }
+  // 章节分支挂摘要段落备注（来自总结缓存按标题匹配，hover 节点可见）
+  const sumChapters = ((sumCache.get(url) || {}).summary || {}).chapters || [];
+  const noteMap = new Map(sumChapters.filter((c) => c.title).map((c) => [c.title, c.summary]));
+  (mm.children || []).forEach((b) => {
+    if ((b.title || '').includes('章节时间线')) (b.children || []).forEach((k) => { k.note = noteMap.get(k.title) || ''; });
+  });
+  // 默认折叠：二级及以下有子节点者收起（根 + 一级分支展开，长树不淹没视图）
+  const initCollapse = (n, depth) => {
+    if (n.collapsed == null) n.collapsed = depth >= 2 && (n.children || []).length > 0;
+    (n.children || []).forEach((k) => initCollapse(k, depth + 1));
+  };
+  initCollapse(mm, 0);
+
   panel.innerHTML = `
-    <div class="fade-in">
-    <div class="flex items-center justify-between gap-2">
+    <div class="fade-in flex h-full min-h-0 flex-col">
+    <div class="flex flex-wrap items-center justify-between gap-2">
       <h4 class="inline-flex items-center gap-2 text-base font-bold text-slate-900">
         <span class="text-brand-500">${TAB_ICONS.mindmap}</span>
         思维导图
         ${(data.cached || mm.cached) ? '<span class="rounded-full bg-emerald-50 px-2 py-0.5 text-xs font-semibold text-emerald-600">已缓存</span>' : ''}
       </h4>
-      <div class="flex items-center gap-3 text-sm">
+      <div class="flex items-center gap-2 text-sm">
+        <span class="mm-err text-xs text-rose-500"></span>
         ${mm.model ? `<span class="text-xs text-slate-400">${escapeHtml(mm.model)}</span>` : ''}
+        <button type="button" class="mm-refresh inline-flex items-center gap-1 font-semibold text-slate-600 transition hover:text-brand-600" title="跳过缓存重新生成">${MM_ICON_REFRESH}重新生成</button>
+        <button type="button" class="mm-copy inline-flex items-center gap-1 font-semibold text-slate-600 transition hover:text-brand-600" title="复制 Markdown 大纲">${ICON.copy}复制</button>
         <div class="relative">
           <button type="button" class="mm-dl inline-flex items-center gap-1 font-semibold text-brand-600 transition hover:text-brand-700">${ICON.dl}下载导图${ICON.caret}</button>
-          <div class="mm-dl-menu absolute right-0 z-10 mt-1 hidden w-36 overflow-hidden rounded-xl border border-slate-200 bg-white py-1 shadow-card">
+          <div class="mm-dl-menu absolute right-0 z-10 mt-1 hidden w-40 overflow-hidden rounded-xl border border-slate-200 bg-white py-1 shadow-card">
             <button type="button" data-kind="png" class="mm-dl-opt block w-full px-3 py-1.5 text-left text-sm text-slate-600 transition hover:bg-brand-50 hover:text-brand-600">PNG 图片</button>
+            <button type="button" data-kind="svg" class="mm-dl-opt block w-full px-3 py-1.5 text-left text-sm text-slate-600 transition hover:bg-brand-50 hover:text-brand-600">SVG 矢量图</button>
             <button type="button" data-kind="md" class="mm-dl-opt block w-full px-3 py-1.5 text-left text-sm text-slate-600 transition hover:bg-brand-50 hover:text-brand-600">Markdown 大纲</button>
+            <button type="button" data-kind="xmind" class="mm-dl-opt block w-full px-3 py-1.5 text-left text-sm text-slate-600 transition hover:bg-brand-50 hover:text-brand-600">XMind 文件（.xmind）</button>
           </div>
         </div>
       </div>
     </div>
-    <div class="mt-4">
-      <div class="inline-block rounded-xl bg-brand-500 px-4 py-2 text-sm font-bold text-white shadow-glow">${escapeHtml(mm.title || '思维导图')}</div>
-      ${kids.length
-        ? `<div class="mt-3 border-l-2 border-brand-100 pl-3 sm:pl-4">${kids.map(mmNode).join('')}</div>`
-        : '<p class="mt-3 text-sm text-slate-400">（该视频暂无更多可展开的分支）</p>'}
+    <div class="mm-canvas relative mt-3 min-h-[22rem] flex-1 overflow-hidden rounded-2xl border border-slate-200 bg-slate-50/70">
+      <svg class="mm-svg h-full w-full touch-none" xmlns="http://www.w3.org/2000/svg"><g class="mm-g"></g></svg>
+      <div class="absolute bottom-3 right-3 flex flex-col divide-y divide-slate-100 overflow-hidden rounded-xl border border-slate-200 bg-white shadow-card">
+        <button type="button" class="mm-zin grid h-8 w-8 place-items-center text-base font-bold text-slate-600 transition hover:bg-slate-50 hover:text-brand-600" title="放大">+</button>
+        <button type="button" class="mm-zout grid h-8 w-8 place-items-center text-base font-bold text-slate-600 transition hover:bg-slate-50 hover:text-brand-600" title="缩小">−</button>
+        <button type="button" class="mm-fit grid h-8 w-8 place-items-center text-slate-600 transition hover:bg-slate-50 hover:text-brand-600" title="适应画布">${MM_ICON_FIT}</button>
+      </div>
     </div>
-    ${mm.truncated ? '<p class="mt-3 text-xs text-amber-600">注：字幕较长，思维导图基于前半部分内容。</p>' : ''}
+    <div class="mt-2 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-400">
+      <span>滚轮缩放 · 拖拽平移 · 点节点折叠/展开 · 点章节时间戳跳转播放</span>
+      ${mm.truncated ? '<span class="text-amber-600">注：字幕较长，思维导图基于前半部分内容。</span>' : ''}
+    </div>
     </div>`;
 
   const base = (mm.title || 'mindmap').replace(/[\\/:*?"<>|]/g, '_');
+  const errEl = panel.querySelector('.mm-err');
+  const svg = panel.querySelector('.mm-svg');
+  const g = svg.querySelector('.mm-g');
+  let view = { x: 24, y: 24, k: 1 };
+  let cur = null;
+  const paint = () => { cur = mmMarkup(mm, false); g.innerHTML = cur.inner; };
+  const apply = () => g.setAttribute('transform', `translate(${view.x},${view.y}) scale(${view.k})`);
+  const fit = () => {
+    if (!cur) return;
+    const r = svg.getBoundingClientRect();
+    if (!r.width || !r.height) return;
+    const k = Math.max(0.2, Math.min((r.width - 48) / cur.bounds.w, (r.height - 48) / cur.bounds.h, 1.6));
+    view = { k, x: (r.width - cur.bounds.w * k) / 2, y: (r.height - cur.bounds.h * k) / 2 };
+    apply();
+  };
+  const zoomBy = (f) => {
+    const r = svg.getBoundingClientRect();
+    const mx = r.width / 2, my = r.height / 2;
+    const k2 = Math.max(0.2, Math.min(3, view.k * f));
+    view = { k: k2, x: mx - (mx - view.x) * (k2 / view.k), y: my - (my - view.y) * (k2 / view.k) };
+    apply();
+  };
+  paint(); fit();
+
+  /* 缩放/平移：wheel 锚定光标；pointer 拖拽平移（移动超阈值抑制随后的 click） */
+  svg.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    const r = svg.getBoundingClientRect();
+    const mx = e.clientX - r.left, my = e.clientY - r.top;
+    const k2 = Math.max(0.2, Math.min(3, view.k * (e.deltaY < 0 ? 1.15 : 0.87)));
+    view = { k: k2, x: mx - (mx - view.x) * (k2 / view.k), y: my - (my - view.y) * (k2 / view.k) };
+    apply();
+  }, { passive: false });
+  let drag = null, moved = false;
+  svg.addEventListener('pointerdown', (e) => {
+    drag = { x: e.clientX, y: e.clientY, vx: view.x, vy: view.y };
+    moved = false;
+    svg.setPointerCapture(e.pointerId);
+  });
+  svg.addEventListener('pointermove', (e) => {
+    if (!drag) return;
+    const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+    if (Math.abs(dx) + Math.abs(dy) > 4) moved = true;
+    view.x = drag.vx + dx; view.y = drag.vy + dy;
+    apply();
+  });
+  const endDrag = () => { drag = null; };
+  svg.addEventListener('pointerup', endDrag);
+  svg.addEventListener('pointercancel', endDrag);
+
+  /* 节点点击：有子节点 → 折叠/展开；章节叶子 → 跳播（复用左栏共享播放器控制器） */
+  const mmJump = async (sec) => {
+    if (playerCtrl) { playerCtrl.seek(sec); return; }
+    if (playerSlot) await mountLeftPlayer(sec);
+  };
+  svg.addEventListener('click', (e) => {
+    if (moved) { moved = false; return; }
+    const gNode = e.target.closest('g.mm-node');
+    if (!gNode || !cur) return;
+    const n = cur.nodesArr[Number(gNode.dataset.i)];
+    if (!n) return;
+    if ((n.children || []).length) { n.collapsed = !n.collapsed; paint(); apply(); return; }
+    if (n.start != null) mmJump(n.start);
+  });
+
+  panel.querySelector('.mm-zin').addEventListener('click', () => zoomBy(1.25));
+  panel.querySelector('.mm-zout').addEventListener('click', () => zoomBy(0.8));
+  panel.querySelector('.mm-fit').addEventListener('click', fit);
+
+  /* 工具栏：重新生成 / 复制 / 下载菜单（PNG/SVG/MD 本地序列化，.xmind 走后端打包） */
+  const refreshBtn = panel.querySelector('.mm-refresh');
+  refreshBtn.addEventListener('click', async () => {
+    const orig = refreshBtn.innerHTML;
+    refreshBtn.disabled = true;
+    refreshBtn.innerHTML = '<span class="inline-flex items-center gap-1"><span class="spinner"></span>生成中…</span>';
+    try { await loadMindmap(url, panel, true); } finally { refreshBtn.disabled = false; refreshBtn.innerHTML = orig; }
+  });
+  panel.querySelector('.mm-copy').addEventListener('click', async () => {
+    const ok = await copyText(buildMindmapMarkdown(mm));
+    errEl.textContent = ok ? '' : '复制失败，请手动选择文本';
+  });
   const mmMenu = panel.querySelector('.mm-dl-menu');
   panel.querySelector('.mm-dl').addEventListener('click', (e) => { e.stopPropagation(); mmMenu.classList.toggle('hidden'); });
-  panel.querySelectorAll('.mm-dl-opt').forEach((opt) => opt.addEventListener('click', () => {
-    if (opt.dataset.kind === 'png') exportMindmapPng(mm, base);
-    else downloadText(`${base}.md`, buildMindmapMarkdown(mm), 'text/markdown');
+  panel.querySelectorAll('.mm-dl-opt').forEach((opt) => opt.addEventListener('click', async () => {
     mmMenu.classList.add('hidden');
+    const kind = opt.dataset.kind;
+    if (kind === 'md') { downloadText(`${base}.md`, buildMindmapMarkdown(mm), 'text/markdown'); return; }
+    if (kind === 'png' || kind === 'svg') {
+      const doc = mmExportDoc(mm);
+      if (kind === 'svg') downloadSvg(doc.markup, base);
+      else await downloadSvgPng(doc.markup, doc.w, doc.h, base);
+      return;
+    }
+    // .xmind：后端 zipfile 打包（含章节时间线 labels）
+    errEl.textContent = '';
+    opt.disabled = true;
+    try {
+      const res = await fetch('/api/mindmap/xmind', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url }),
+      });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({}));
+        errEl.textContent = d.detail || `导出失败 (HTTP ${res.status})`;
+        return;
+      }
+      downloadBlob(`${base}.xmind`, await res.blob());
+    } catch (e) {
+      errEl.textContent = e.message || '网络错误，导出失败';
+    } finally { opt.disabled = false; }
   }));
 };
 
@@ -707,14 +977,14 @@ const loadTranscript = async (url, panel) => {
   } finally { stop(); }
 };
 
-const loadMindmap = async (url, panel) => {
+const loadMindmap = async (url, panel, refresh = false) => {
   const hit = mindmapCache.get(url);
-  if (hit) { renderMindmap(panel, { ...hit, cached: true }); return true; }
+  if (hit && !refresh) { renderMindmap(panel, { ...hit, cached: true }, url); return true; }
   const stop = panelLoading(panel, [
     '正在提取字幕…', '正在让大模型梳理内容层级…', '正在生成思维导图…',
   ]);
   try {
-    const { res, data } = await dedup('mm:' + url, () => postJson('/api/mindmap', { url }));
+    const { res, data } = await dedup('mm:' + url + (refresh ? ':refresh' : ''), () => postJson('/api/mindmap', { url, refresh }));
     if (!res.ok) {
       panelError(panel, res.status === 503
         ? `${data.detail || 'AI 未配置'}。${AI_CONFIG_HINT}`
@@ -722,7 +992,7 @@ const loadMindmap = async (url, panel) => {
       return false;
     }
     mindmapCache.set(url, data);
-    renderMindmap(panel, data);
+    renderMindmap(panel, data, url);
     return true;
   } catch (e) {
     panelError(panel, e.message || '网络错误，思维导图生成失败');
@@ -830,11 +1100,14 @@ const bindCard = (cardEl, url) => {
   cardEl._aiState = { loaded: new Set() };
   bindSplitter(cardEl);
 
-  /* 左栏封面播放器槽位：点封面播放按钮 → 原位挂载嵌入播放器（字幕 Tab 共享控制器） */
+  /* 左栏封面播放器槽位：点封面播放按钮 → 原位挂载播放器（字幕 Tab 共享控制器）。
+   * 无外链嵌入播放器的平台（抖音等）也建槽：挂载时降级走 /api/stream 原生播放 */
   setPlayerCtrl(null);   // 换卡：销毁旧播放器
   const slotEl = cardEl.querySelector('.player-slot');
-  const slotTarget = detectPlayer(url);
-  playerSlot = slotEl && slotTarget ? { el: slotEl, target: slotTarget, posterHtml: slotEl.innerHTML } : null;
+  const slotImg = slotEl ? slotEl.querySelector('img') : null;
+  playerSlot = slotEl
+    ? { el: slotEl, target: detectPlayer(url), url, posterUrl: slotImg ? slotImg.src : '', posterHtml: slotEl.innerHTML }
+    : null;
   if (slotEl) slotEl.addEventListener('click', (e) => {
     if (!e.target.closest('.player-play')) return;
     mountLeftPlayer(0);

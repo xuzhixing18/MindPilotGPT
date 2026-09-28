@@ -418,6 +418,41 @@ def test_qa_errors():
     print("[qa] empty-text / empty-question / no-key / empty-answer / LLMError ok")
 
 
+def test_mindmap_chapters_and_xmind():
+    # _fmt_ts：mm:ss 与 h:mm:ss 两档
+    assert ai_mindmap._fmt_ts(0) == "00:00"
+    assert ai_mindmap._fmt_ts(61) == "01:01"
+    assert ai_mindmap._fmt_ts(3725) == "1:02:05"
+
+    mm = {"title": "中心", "children": [{"title": "内容脉络", "children": []}]}
+    # 无章节 / 脏章节（缺 title 或 start）→ 原样返回
+    assert ai_mindmap.attach_chapters(mm, None) is mm
+    assert ai_mindmap.attach_chapters(mm, [{"title": "x"}, {"start": 1}]) is mm
+    # 正常章节 → 追加「章节时间线」分支，节点带 start
+    full = ai_mindmap.attach_chapters(mm, [{"title": "开篇", "start": 0, "end": 60}, {"title": "正文", "start": 61.5}])
+    branch = full["children"][-1]
+    assert branch["title"] == "章节时间线"
+    assert [c["start"] for c in branch["children"]] == [0.0, 61.5]
+    assert full["children"][0]["title"] == "内容脉络"   # 原分支保留
+
+    # xmind 打包：zip 三件套 + content.json 结构（labels 带时间戳）
+    import io
+    import zipfile
+    data = ai_mindmap.to_xmind_bytes(full)
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        names = set(zf.namelist())
+        assert {"content.json", "metadata.json", "manifest.json"} <= names
+        content = json.loads(zf.read("content.json"))
+    sheet = content[0]
+    assert sheet["class"] == "sheet" and sheet["title"] == "中心"
+    root = sheet["rootTopic"]
+    assert root["title"] == "中心"
+    timeline = root["children"]["attached"][-1]
+    assert timeline["title"] == "章节时间线"
+    assert timeline["children"]["attached"][1]["labels"] == ["01:01"]
+    print("[mindmap] attach_chapters & to_xmind_bytes ok")
+
+
 def _cleanup():
     """尽力释放引擎并删除临时库（Windows 下 WAL 文件可能短暂占用，失败即忽略）。"""
     try:
@@ -442,6 +477,7 @@ if __name__ == "__main__":
         test_build_mindmap_errors()
         test_build_mindmap_cache()
         test_build_mindmap_singleflight()
+        test_mindmap_chapters_and_xmind()
         test_qa_sanitize_history()
         test_qa_ask_messages()
         test_qa_errors()

@@ -3,9 +3,11 @@
 提供的主要接口：
 - GET  /api/info       解析视频链接，返回标题/封面/可选清晰度
 - POST /api/download   服务端下载并流式回传文件（手机/网页均可保存）
+- GET  /api/stream     在线流式播放（磁盘缓存 + Range，供抖音等无外链播放器平台的 <video> 原生播放）
 - POST /api/transcribe 提取视频字幕（转写为带时间戳文本）
 - POST /api/summarize  字幕 → 大模型结构化总结（摘要/要点/章节）
-- POST /api/mindmap    字幕 → 大模型层级思维导图
+- POST /api/mindmap    字幕 → 大模型层级思维导图（响应附带平台章节供时间线分支）
+- POST /api/mindmap/xmind  导图 + 章节时间线 → XMind Zen 文件（.xmind）下载
 - POST /api/qa         字幕 → 基于内容的多轮问答
 
 同时托管项目根目录 frontend/ 下的单页前端。
@@ -17,13 +19,17 @@
 
 from __future__ import annotations
 
+import mimetypes
 import os
+import re
+import shutil
 import sys
+from hashlib import sha1
 from pathlib import Path
 
 from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.background import BackgroundTask
 
@@ -36,6 +42,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from backend import ai, auth, comments, downloader, library, storage, transcribe
+from backend.downloader.common import DOWNLOAD_DIR
 
 # 前端静态目录：项目根目录下的 frontend/
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
@@ -253,6 +260,106 @@ def _download_response(url: str, format_id: str | None) -> FileResponse:
     )
 
 
+# ---------------- 在线流式播放（/api/stream） ----------------
+# 面向无官方外链嵌入播放器的平台（抖音等）：前端 <video> 原生播放器直接指向本端点，
+# 服务端把视频完整拉取到磁盘缓存后按 HTTP Range 分块回传（seek 依赖 206 支持）。
+# 与 /api/download 的「回传即删」不同：流播文件常驻缓存目录复用，按数量上限 LRU 清理。
+_STREAM_DIR = DOWNLOAD_DIR / "stream_cache"
+_STREAM_MAX_FILES = 12
+_stream_cache: dict[str, Path] = {}   # normalized_url → 缓存文件（进程内映射，重启后按磁盘重建）
+_stream_flight = storage.SingleFlight()   # 同一 url 并发只下载一次（video 标签会同时发多个 Range 请求）
+
+
+def _prune_stream_dir() -> None:
+    """缓存目录限量：超出上限时按修改时间删最旧的。"""
+    try:
+        files = sorted(_STREAM_DIR.glob("*"), key=lambda p: p.stat().st_mtime, reverse=True)
+    except OSError:
+        return
+    for stale in files[_STREAM_MAX_FILES:]:
+        _cleanup(str(stale))
+
+
+def _stream_file(url: str) -> Path:
+    """确保 url 对应视频已落盘缓存，返回文件路径（single-flight 内做双重检查）。"""
+    key = storage.normalize_url(url)
+    hit = _stream_cache.get(key)
+    if hit and hit.exists():
+        return hit
+
+    def work() -> Path:
+        hit = _stream_cache.get(key)
+        if hit and hit.exists():
+            return hit
+        result = downloader.download(url, None)
+        src = Path(result["filepath"])
+        _STREAM_DIR.mkdir(parents=True, exist_ok=True)
+        dest = _STREAM_DIR / f"{sha1(key.encode()).hexdigest()}{src.suffix or '.mp4'}"
+        for old in _STREAM_DIR.glob(sha1(key.encode()).hexdigest() + ".*"):   # 同 key 旧扩展名残留
+            _cleanup(str(old))
+        shutil.move(str(src), dest)
+        _stream_cache[key] = dest
+        _prune_stream_dir()
+        return dest
+
+    return _stream_flight.run(key, work)
+
+
+_RANGE_RE = re.compile(r"bytes=(\d*)-(\d*)")
+
+
+def _range_response(path: Path, range_header: str | None) -> Response:
+    """构造全量（200）或 Range 分块（206）响应；FileResponse 不支持 Range，需手写。"""
+    size = path.stat().st_size
+    media = mimetypes.guess_type(path.name)[0] or "video/mp4"
+    start, end, status = 0, size - 1, 200
+    match = _RANGE_RE.match(range_header or "")
+    if match:
+        first, last = match.groups()
+        if first:   # bytes=N- 或 bytes=N-M
+            start = int(first)
+            if last:
+                end = min(int(last), size - 1)
+        elif last:   # 后缀形式 bytes=-N：取末尾 N 字节（end 保持文件末尾）
+            start = max(0, size - int(last))
+        if start > end or start >= size:
+            return Response(status_code=416, headers={"Content-Range": f"bytes */{size}"})
+        status = 206
+    length = end - start + 1
+
+    def chunks():
+        with path.open("rb") as fh:
+            fh.seek(start)
+            left = length
+            while left > 0:
+                buf = fh.read(min(256 * 1024, left))
+                if not buf:
+                    break
+                left -= len(buf)
+                yield buf
+
+    headers = {"Content-Length": str(length), "Accept-Ranges": "bytes"}
+    if status == 206:
+        headers["Content-Range"] = f"bytes {start}-{end}/{size}"
+    return StreamingResponse(chunks(), status_code=status, media_type=media, headers=headers)
+
+
+@app.get("/api/stream")
+def get_stream(
+    request: Request,
+    url: str = Query(..., min_length=1, description="视频链接"),
+    user: auth.CurrentUser = _AUTH_GATE,
+) -> Response:
+    """在线流式播放：磁盘缓存 + HTTP Range 分块回传（供前端原生 <video> 播放/seek）。"""
+    try:
+        path = _stream_file(url)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"播放源获取失败：{exc}") from exc
+    return _range_response(path, request.headers.get("range"))
+
+
 @app.post("/api/transcribe")
 def post_transcribe(
     url: str = Body(..., embed=True, min_length=1),
@@ -348,12 +455,47 @@ def post_mindmap(
         "title": tr.get("title"),
         "cached": bool(mindmap.get("cached")),
         "mindmap": mindmap,
+        # 平台章节（带时间戳）：前端注入为「章节时间线」分支，节点可点击跳播
+        "chapters": tr.get("chapters") or [],
     })
     if user.is_authenticated:
         resp.background = BackgroundTask(
             library.record_action, user.user_id or "", url, tr.get("title") or "", "mindmap",
         )
     return resp
+
+
+@app.post("/api/mindmap/xmind")
+def post_mindmap_xmind(
+    url: str = Body(..., embed=True, min_length=1),
+    user: auth.CurrentUser = _AUTH_GATE,
+) -> Response:
+    """导图（缓存优先）+ 章节时间线 → XMind Zen 文件回传，供用户导入 XMind 二次编辑。"""
+    try:
+        tr = transcribe.transcribe(url)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"转写出错：{exc}") from exc
+
+    try:
+        cfg = auth.ai_override_cfg(user)
+        mindmap = ai.build_mindmap(tr["text"], tr.get("title", ""), cfg=cfg)
+    except ai.AINotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except ai.MindmapError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"思维导图出错：{exc}") from exc
+
+    full = ai.attach_chapters(mindmap, tr.get("chapters"))
+    data = ai.to_xmind_bytes(full)
+    name = re.sub(r'[\\/:*?"<>|]', "_", (full.get("title") or "mindmap"))[:60]
+    return Response(
+        content=data,
+        media_type="application/octet-stream",
+        headers={"Content-Disposition": f'attachment; filename="{name}.xmind"'},
+    )
 
 
 @app.post("/api/qa")

@@ -270,95 +270,58 @@ const downloadBlob = (filename, blob) => {
   a.remove();
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 };
+export { downloadBlob };
 export const downloadText = (filename, text, mime) => downloadBlob(filename, new Blob([text], { type: mime }));
 
-/* ---------- 思维导图导出（Markdown 大纲 / Canvas PNG，无第三方库） ---------- */
+// 通用复制到剪贴板：安全上下文走 clipboard API，其余回退 execCommand（与字幕 Tab 同策略）
+export const copyText = async (text) => {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch (e) {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    document.body.appendChild(ta);
+    ta.select();
+    let ok = false;
+    try { ok = document.execCommand('copy'); } catch (e2) { ok = false; }
+    ta.remove();
+    return ok;
+  }
+};
+
+/* ---------- 思维导图导出（SVG 视图序列化：.svg / 光栅化 .png，无第三方库） ---------- */
 export const buildMindmapMarkdown = (mm) => {
   const lines = [`# ${mm.title || '思维导图'}`];
   const walk = (n, depth) => (n.children || []).forEach((k) => {
-    lines.push(`${'  '.repeat(depth)}- ${k.title || ''}`);
+    const ts = k.start != null ? `[${fmtTs(k.start)}] ` : '';   // 章节时间线节点带时间戳
+    lines.push(`${'  '.repeat(depth)}- ${ts}${k.title || ''}`);
     walk(k, depth + 1);
   });
   walk(mm, 0);
   return lines.join('\n');
 };
 
-export const exportMindmapPng = (mm, baseName) => {
-  // 先序展开为行 {title, depth}，并记录每个节点的直接子节点行号用于画连接线
-  const rows = [];
-  const directKids = new Map();   // row -> [childRow...]
-  const walk = (n, depth) => {
-    const row = rows.length;
-    rows.push({ title: n.title || '', depth });
-    const direct = (n.children || []).map((k) => walk(k, depth + 1));
-    if (direct.length) directKids.set(row, direct);
-    return row;
+// 直接下载 SVG 源文件（矢量，可导入绘图工具）
+export const downloadSvg = (svgMarkup, baseName) =>
+  downloadBlob(`${baseName}.svg`, new Blob([svgMarkup], { type: 'image/svg+xml' }));
+
+// SVG → Image → canvas 光栅化导出 PNG（svg 内无外部资源，不会 taint canvas）
+export const downloadSvgPng = (svgMarkup, w, h, baseName, scale = 2) => new Promise((resolve) => {
+  const img = new Image();
+  img.onload = () => {
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.ceil(w * scale);
+    canvas.height = Math.ceil(h * scale);
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#FFFFFF';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    canvas.toBlob((blob) => { if (blob) downloadBlob(`${baseName}.png`, blob); resolve(); }, 'image/png');
   };
-  walk(mm, 0);
-
-  const ROW_H = 40, RECT_H = 30, INDENT = 30, PAD_X = 12, MARGIN = 24;
-  const dpr = window.devicePixelRatio || 1;
-  const canvas = document.createElement('canvas');
-  const ctx = canvas.getContext('2d');
-  const font = (bold) => `${bold ? '600 ' : ''}14px -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif`;
-  const xOf = (d) => MARGIN + d * INDENT;
-  const yOf = (r) => MARGIN + r * ROW_H;
-
-  // 先按 1x 测量文本宽度以确定画布尺寸
-  const widths = rows.map((r, i) => {
-    ctx.font = font(i === 0);
-    return ctx.measureText(r.title).width + PAD_X * 2;
-  });
-  const W = Math.max(...rows.map((r, i) => xOf(r.depth) + widths[i])) + MARGIN;
-  const H = MARGIN * 2 + (rows.length - 1) * ROW_H + RECT_H;
-  canvas.width = Math.ceil(W * dpr);
-  canvas.height = Math.ceil(H * dpr);
-  ctx.scale(dpr, dpr);
-
-  ctx.fillStyle = '#FFFFFF';
-  ctx.fillRect(0, 0, W, H);
-
-  const roundRect = (x, y, w, h, r) => {
-    ctx.beginPath();
-    ctx.moveTo(x + r, y);
-    ctx.arcTo(x + w, y, x + w, y + h, r);
-    ctx.arcTo(x + w, y + h, x, y + h, r);
-    ctx.arcTo(x, y + h, x, y, r);
-    ctx.arcTo(x, y, x + w, y, r);
-    ctx.closePath();
-  };
-
-  // 连接线：父节点下引竖脊 + 到各直接子节点的横档
-  ctx.strokeStyle = '#CBD5E1';
-  ctx.lineWidth = 1.5;
-  directKids.forEach((kids, row) => {
-    const spineX = xOf(rows[row].depth) + 12;
-    ctx.beginPath();
-    ctx.moveTo(spineX, yOf(row) + RECT_H);
-    ctx.lineTo(spineX, yOf(kids[kids.length - 1]) + RECT_H / 2);
-    ctx.stroke();
-    kids.forEach((c) => {
-      ctx.beginPath();
-      ctx.moveTo(spineX, yOf(c) + RECT_H / 2);
-      ctx.lineTo(xOf(rows[c].depth), yOf(c) + RECT_H / 2);
-      ctx.stroke();
-    });
-  });
-
-  // 节点：根为品牌蓝实心，其余浅灰底
-  rows.forEach((r, i) => {
-    const x = xOf(r.depth), y = yOf(i), w = widths[i];
-    ctx.fillStyle = i === 0 ? '#1677FF' : '#F1F5F9';
-    roundRect(x, y, w, RECT_H, 8);
-    ctx.fill();
-    ctx.font = font(i === 0);
-    ctx.fillStyle = i === 0 ? '#FFFFFF' : '#334155';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(r.title, x + PAD_X, y + RECT_H / 2);
-  });
-
-  canvas.toBlob((blob) => { if (blob) downloadBlob(`${baseName}.png`, blob); }, 'image/png');
-};
+  img.onerror = () => resolve();   // 导出失败静默：不阻断 UI
+  img.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svgMarkup)}`;
+});
 
 /* ---------- 复用小图标 ---------- */
 export const ICON = {

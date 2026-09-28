@@ -19,13 +19,20 @@ from __future__ import annotations
 from backend.ai import catalog
 from backend.ai.config import PROVIDERS, ai_available, current_label, load_config, models_payload
 from backend.ai.summary import AINotConfiguredError, SummarizeError, summarize
-from backend.ai.mindmap import MindmapError, build_mindmap
+from backend.ai.mindmap import (
+    MindmapError,
+    attach_chapters,
+    build_mindmap,
+    to_xmind_bytes,
+)
 from backend.ai.qa import QAError, ask
 
 __all__ = [
     "catalog",
     "summarize",
     "build_mindmap",
+    "attach_chapters",
+    "to_xmind_bytes",
     "ask",
     "ai_available",
     "current_label",

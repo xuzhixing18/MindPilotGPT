@@ -11,6 +11,10 @@
 
 from __future__ import annotations
 
+import io
+import itertools
+import json
+import zipfile
 from typing import Any
 
 from backend import storage  # 思维导图缓存 + 并发去重（阶段0：SQLite）
@@ -25,7 +29,9 @@ _MAX_CHARS = 30000
 
 # 提示词版本：修改 _SYSTEM_PROMPT / _build_prompt 后手动 bump，旧缓存自然失效
 # v2：新增「字符串值内禁未转义英文双引号/禁漏逗号尾随逗号」约束，降低偶发非法 JSON 概率
-PROMPT_VERSION = "v2"
+# v3：一级分支固定四分区（内容脉络/亮点/思考问题/内容标签）+ 允许 emoji 前缀，
+#     对齐竞品导图的内容结构化分区（摘要/亮点/思考/标签）
+PROMPT_VERSION = "v3"
 
 # 树的规模上限：限制深度与每层宽度，保证前端可渲染、响应体可控
 _MAX_DEPTH = 4
@@ -67,10 +73,16 @@ def _build_prompt(title: str, text: str, truncated: bool) -> str:
 
 要求：
 1. 全部使用简体中文，节点标题精炼（每个不超过 24 字）；
-2. 一级分支 3~6 个，每个分支下二级要点 2~5 个，最多到三级；
+2. 一级分支必须按以下顺序包含四个固定分区（标题可微调但语义不变）：
+   - 「内容脉络」：3~6 个子节点，按视频推进顺序梳理核心板块；
+   - 「亮点」：2~5 个子节点，视频中最有价值的观点 / 事实 / 案例；
+   - 「思考问题」：2~4 个子节点，以疑问句表述值得深挖的问题；
+   - 「内容标签」：2~6 个子节点，每个节点形如「#标签」；
+   各分区子节点最多再下探一级（即全树最多三级）；
 3. 忠于字幕内容，不臆造不存在的信息；叶子节点的 children 用空数组 []；
 4. 中心主题应概括整段视频主旨，而非照抄标题；
-5. JSON 字符串值内如需引用一律用中文引号「」，禁止未转义的英文双引号与反斜杠，禁止漏逗号或尾随逗号。"""
+5. 节点标题可前置一个贴切的 emoji（如「🔥 认知革命」），增强可读性；
+6. JSON 字符串值内如需引用一律用中文引号「」，禁止未转义的英文双引号与反斜杠，禁止漏逗号或尾随逗号。"""
 
 
 def _find_root(data: Any) -> Any:
@@ -185,3 +197,75 @@ def build_mindmap(
         return result
 
     return storage.mindmap_flight.run(key, _do)
+
+
+# --------------------------------------------------------------------------- #
+# 章节时间线注入与 XMind 导出
+# --------------------------------------------------------------------------- #
+def _fmt_ts(sec: float) -> str:
+    """秒 → mm:ss / h:mm:ss（与前端 fmtTs 同构，用于章节徽标与 xmind 标签）。"""
+    total = int(max(0, sec))
+    hours, rem = divmod(total, 3600)
+    minutes, seconds = divmod(rem, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes:02d}:{seconds:02d}"
+
+
+def attach_chapters(mm: dict[str, Any], chapters: list[dict[str, Any]] | None) -> dict[str, Any]:
+    """把平台章节（带时间戳）注入为「章节时间线」分支，供前端渲染时间戳节点跳播。
+
+    章节来自转写链路（平台自带 chapters），无章节时原样返回；注入节点携带
+    ``start`` 字段（前端据此渲染时间戳徽标并绑定跳转），不经过 LLM。
+    """
+    items = [
+        c for c in (chapters or [])
+        if isinstance(c, dict) and c.get("title") and c.get("start") is not None
+    ]
+    if not items:
+        return mm
+    branch = {
+        "title": "章节时间线",
+        "children": [
+            {"title": str(c["title"]).strip(), "children": [], "start": float(c["start"])}
+            for c in items
+        ],
+    }
+    return {**mm, "children": [*(mm.get("children") or []), branch]}
+
+
+def _xmind_topic(node: dict[str, Any], seq: itertools.count) -> dict[str, Any]:
+    """递归转 XMind Zen topic；章节节点的时间戳放入 labels（XMind 节点下小标签）。"""
+    topic: dict[str, Any] = {
+        "id": f"topic{next(seq)}",
+        "class": "topic",
+        "title": node.get("title") or "",
+    }
+    start = node.get("start")
+    if start is not None:
+        topic["labels"] = [_fmt_ts(start)]
+    kids = [k for k in (node.get("children") or []) if isinstance(k, dict)]
+    if kids:
+        topic["children"] = {"attached": [_xmind_topic(k, seq) for k in kids]}
+    return topic
+
+
+def to_xmind_bytes(mm: dict[str, Any]) -> bytes:
+    """导图树 → XMind Zen（.xmind）文件字节：zip(content.json/metadata.json/manifest.json)。
+
+    仅用标准库 zipfile；XMind 2020+ 可直接打开，便于用户二次编辑。
+    """
+    content = [{
+        "id": "sheet1",
+        "class": "sheet",
+        "title": mm.get("title") or "思维导图",
+        "rootTopic": _xmind_topic(mm, itertools.count(1)),
+    }]
+    metadata = {"creator": {"name": "MindPilot-GPT", "version": "1.0"}}
+    manifest = {"file-entries": {"content.json": {}, "metadata.json": {}}}
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("content.json", json.dumps(content, ensure_ascii=False))
+        zf.writestr("metadata.json", json.dumps(metadata, ensure_ascii=False))
+        zf.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False))
+    return buf.getvalue()
