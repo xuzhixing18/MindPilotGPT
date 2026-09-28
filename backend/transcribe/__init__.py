@@ -53,18 +53,19 @@ def _no_subtitle_hint(url: str, sub_error: Exception) -> str:
     host = _host(url)
     if "douyin.com" in host or "iesdouyin.com" in host:
         return (
-            "抖音视频没有独立字幕轨，无法直接提取字幕。可配置语音识别(ASR)兜底："
-            "在 .env 设置 SILICONFLOW_API_KEY（硅基流动 SenseVoice 免费不限量）后重启服务即可转写。"
+            "抖音视频没有独立字幕轨，无法直接提取字幕。可配置语音识别(ASR)兜底：在 .env 设置 "
+            "DASHSCOPE_API_KEY（百炼 Fun-ASR，转写带句级时间戳）或 SILICONFLOW_API_KEY（免费但无时间戳）"
+            "后重启服务即可转写。"
         )
     if "bilibili.com" in host or "b23.tv" in host:
         return (
             "该 B站视频未找到可抓字幕。B站 AI 字幕需登录态：请在 .env 配置 "
             "COOKIES_FROM_BROWSER=edge（或 COOKIE_FILE 指向 cookies.txt）后重启；"
-            "或设置 SILICONFLOW_API_KEY 启用语音识别兜底。"
+            "或设置 DASHSCOPE_API_KEY / SILICONFLOW_API_KEY 启用语音识别兜底。"
         )
     return (
-        f"{sub_error} 可在 .env 设置 SILICONFLOW_API_KEY（或 DASHSCOPE_API_KEY）"
-        "启用语音识别(ASR)兜底后重试。"
+        f"{sub_error} 可在 .env 设置 DASHSCOPE_API_KEY（百炼 Fun-ASR，带时间戳）"
+        "或 SILICONFLOW_API_KEY（免费无时间戳）启用语音识别(ASR)兜底后重试。"
     )
 
 
@@ -83,6 +84,7 @@ def _transcribe_via_asr(url: str) -> dict[str, Any]:
         "language_name": "语音识别",
         "source": "asr",
         "segments": result.get("segments") or [],
+        "chapters": [],  # ASR 链路不保留平台章节（音频下载阶段已丢弃 info）
         "text": text,
         "char_count": len(text),
         "webpage_url": url,

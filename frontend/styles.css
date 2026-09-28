@@ -32,3 +32,11 @@ html, body {
   animation: stripes 1s linear infinite;
 }
 @keyframes stripes { from { background-position: 0 0; } to { background-position: 1rem 0; } }
+
+/* 字幕脚本工作台：卡片式字幕行 / 当前段高亮 / 搜索命中 / 章节选中态 */
+.sub-row { border-color: #E2E8F0; background: #FFFFFF; }
+.sub-row:hover { border-color: #CBD5E1; }
+.sub-active { background: #EFF6FF; border-color: #93C5FD; }
+.sub-active .sub-ts { font-weight: 700; }
+mark.sub-hit { background: #FDE68A; border-radius: 2px; padding: 0 1px; }
+.sub-chip-on { border-color: #93C5FD; background: #EFF6FF; color: #2563EB; }

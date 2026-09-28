@@ -257,7 +257,7 @@ const srtTime = (sec) => {
 export const buildSubtitleText = (segs, kind) => segs
   .map((seg, i) => {
     if (kind !== 'srt') return seg.text;
-    const end = seg.end != null ? seg.end : (segs[i + 1] ? seg[i + 1].start : seg.start);
+    const end = seg.end != null ? seg.end : (segs[i + 1] ? segs[i + 1].start : seg.start);
     return `${i + 1}\n${srtTime(seg.start)} --> ${srtTime(end)}\n${seg.text}\n`;
   })
   .join('\n');
@@ -373,6 +373,7 @@ export const ICON = {
   copy: '<svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 012-2h10"/></svg>',
   check: '<svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 6L9 17l-5-5"/></svg>',
   thumb: '<svg viewBox="0 0 24 24" class="h-3.5 w-3.5" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 9V5a3 3 0 00-6 0v4H5a2 2 0 00-2 2l1 8a2 2 0 002 2h11a2 2 0 002-1.6l1.2-7A2 2 0 0018.2 9H14z"/><path d="M8 9v12"/></svg>',
+  play: '<svg viewBox="0 0 24 24" class="h-5 w-5" fill="currentColor" stroke="none"><path d="M8 5.5v13l11-6.5-11-6.5z"/></svg>',
 };
 
 export const AI_CONFIG_HINT = '请复制 .env.example 为 .env 并填入 API Key 后重启服务。';

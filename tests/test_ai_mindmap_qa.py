@@ -42,6 +42,10 @@ from backend.storage import keys, repo  # noqa: E402
 # _set_fake_llm 钉住 AI_MODEL=deepseek-chat，故 model_label（label · model）恒为下面这个串
 _MODEL_LABEL = "DeepSeek · deepseek-chat"
 
+# 本文件单独运行时临时库是新建的空库：必须先建表，否则 repo 读写报 no such table
+# （与 storage/mindmap 同进程运行时由前序模块建表，此处 create_all 幂等无副作用）。
+storage.init_db()
+
 _AI_ENV_KEYS = (
     "AI_PROVIDER", "AI_API_KEY", "AI_MODEL", "AI_BASE_URL",
     "LLM_PROVIDER", "LLM_MODEL_ID", "LLM_API_KEY", "LLM_MODEL", "LLM_BASE_URL",

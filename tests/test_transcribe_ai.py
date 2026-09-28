@@ -17,6 +17,12 @@ from pathlib import Path
 # 将项目根目录加入 sys.path，保证从任意位置运行都能导入 backend 包
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+# 关键：db.py 在「导入时」即按 DATABASE_URL 建 engine。多测试文件同 pytest 进程运行时，
+# 若本文件先导入而未预设临时库，engine 会绑到项目真实库：既使后续 storage/mindmap
+# 测试文件的临时库隔离失效，又会把测试残留行写进生产库。故导入 backend 前指向临时库。
+_TMP_DIR = Path(tempfile.mkdtemp(prefix="mp_tx_ai_test_"))
+os.environ["DATABASE_URL"] = f"sqlite:///{(_TMP_DIR / 'test_tx_ai.db').as_posix()}"
+
 from backend.ai import config as ai_config  # noqa: E402
 from backend.ai import jsonx  # noqa: E402
 from backend.ai import summary as ai_summary  # noqa: E402
@@ -302,6 +308,23 @@ def test_dedupe():
     print("[dedupe] ok")
 
 
+def test_extract_chapters():
+    # 平台原生章节归一化：过滤非法条目、去首尾空白、按 start 排序、end 缺失为 None
+    info = {"chapters": [
+        {"title": " 结尾 ", "start_time": 30},
+        {"title": "开场", "start_time": 0, "end_time": 30},
+        {"title": "bad", "start_time": "x"},
+        {"bad": 1},
+        "not-a-dict",
+    ]}
+    assert subtitles._extract_chapters(info) == [
+        {"title": "开场", "start": 0.0, "end": 30.0},
+        {"title": "结尾", "start": 30.0, "end": None},
+    ]
+    assert subtitles._extract_chapters({}) == []
+    print("[subtitles] extract chapters ok")
+
+
 def test_apply_cookies():
     os.environ.pop("COOKIE_FILE", None)
     os.environ.pop("COOKIES_FROM_BROWSER", None)
@@ -343,7 +366,7 @@ def test_asr_chain():
     assert asr.asr_available() is False
     assert asr.asr_label() == ""
 
-    # 仅硅基流动
+    # 仅硅基流动（无 DashScope Key -> Fun-ASR 自动跳过）
     os.environ["SILICONFLOW_API_KEY"] = "sk-sf"
     chain = asr.load_asr_chain()
     assert [c.provider for c in chain] == ["siliconflow"]
@@ -352,22 +375,27 @@ def test_asr_chain():
     assert chain[0].base_url == "https://api.siliconflow.cn/v1"
     assert asr.asr_available() is True and asr.asr_label() == "硅基流动 SenseVoice"
 
-    # 硅基流动 + DashScope -> 默认顺序 [siliconflow, dashscope]
+    # 硅基流动 + DashScope -> 默认顺序 [dashscope_funasr, siliconflow, dashscope]（Fun-ASR 带时间戳优先）
     os.environ["DASHSCOPE_API_KEY"] = "sk-ds"
-    assert [c.provider for c in asr.load_asr_chain()] == ["siliconflow", "dashscope"]
-    ds = asr.load_asr_chain()[1]
+    assert [c.provider for c in asr.load_asr_chain()] == ["dashscope_funasr", "siliconflow", "dashscope"]
+    fun = asr.load_asr_chain()[0]
+    assert fun.style == "funasr_sse" and fun.model == "fun-asr-flash-2026-06-15"
+    assert fun.base_url == "https://dashscope.aliyuncs.com"
+    ds = asr.load_asr_chain()[2]
     assert ds.style == "chat_audio" and ds.model == "qwen3-asr-flash"
 
-    # ASR_PROVIDER 显式改序
+    # ASR_PROVIDER 显式改序 / 别名（未显式列出的默认序 provider 仍会补齐到链尾）
     os.environ["ASR_PROVIDER"] = "dashscope,siliconflow"
-    assert [c.provider for c in asr.load_asr_chain()] == ["dashscope", "siliconflow"]
+    assert [c.provider for c in asr.load_asr_chain()] == ["dashscope", "siliconflow", "dashscope_funasr"]
+    os.environ["ASR_PROVIDER"] = "fun-asr-flash,siliconflow"
+    assert [c.provider for c in asr.load_asr_chain()] == ["dashscope_funasr", "siliconflow", "dashscope"]
     os.environ.pop("ASR_PROVIDER")
 
-    # 仅 DashScope（QWEN_API_KEY 别名亦可）
+    # 仅 DashScope（QWEN_API_KEY 别名亦可）-> [funasr, chat_audio]
     _clear_asr_env()
     os.environ["QWEN_API_KEY"] = "sk-qw"
     chain = asr.load_asr_chain()
-    assert [c.provider for c in chain] == ["dashscope"] and chain[0].api_key == "sk-qw"
+    assert [c.provider for c in chain] == ["dashscope_funasr", "dashscope"] and chain[0].api_key == "sk-qw"
 
     # 自定义 OpenAI 兼容端点（最优先）
     _clear_asr_env()
@@ -380,6 +408,65 @@ def test_asr_chain():
     assert chain[0].model == "whisper-large-v3-turbo"
     _clear_asr_env()
     print("[asr] provider chain / order / custom ok")
+
+
+def test_funasr_sse_parse():
+    # 实测语义：output.sentence 是「当前累积句」，每个事件 text/end_time 持续增长；
+    # 取最后一个 sentence_end=True 事件，从其 words（词级时间戳）按句末标点重建句级分段
+    ev_mid = {"output": {
+        "sentence": {"sentence_id": 1, "sentence_end": True, "begin_time": 0,
+                      "end_time": 30000, "text": "中途快照。",
+                      "words": [
+                          {"begin_time": 0, "end_time": 1000, "punctuation": "", "text": "中途"},
+                          {"begin_time": 1000, "end_time": 2000, "punctuation": "。", "text": "快照"},
+                      ]},
+        "text": "中途快照。"}}
+    ev_final = {"output": {
+        "sentence": {"sentence_id": 1, "sentence_end": True, "begin_time": 160, "end_time": 6800,
+                      "text": "第一句完整。第二句！",
+                      "words": [
+                          {"begin_time": 160, "end_time": 2000, "punctuation": "", "text": "第一句"},
+                          {"begin_time": 2000, "end_time": 3800, "punctuation": "。", "text": "完整"},
+                          {"begin_time": 4200, "end_time": 5000, "punctuation": "", "text": "第二"},
+                          {"begin_time": 5000, "end_time": 6800, "punctuation": "！", "text": "句"},
+                      ]},
+        "text": "第一句完整。第二句！"}}
+    text, segs = asr._parse_funasr_events([ev_mid, ev_final])
+    assert text == "第一句完整。第二句！"          # 累积全文取最后
+    assert segs == [
+        {"start": 0.16, "end": 3.8, "text": "第一句完整。"},
+        {"start": 4.2, "end": 6.8, "text": "第二句！"},
+    ]
+
+    # 词级序列无句末标点收尾：尾段也成段（不丢尾）
+    ev_tail = {"output": {"sentence": {"sentence_end": True, "begin_time": 0, "end_time": 3000, "text": "没有句号",
+                                            "words": [{"begin_time": 0, "end_time": 3000, "punctuation": "", "text": "没有句号"}]}}}
+    _, s2 = asr._parse_funasr_events([ev_tail])
+    assert s2 == [{"start": 0.0, "end": 3.0, "text": "没有句号"}]
+
+    # 无词级时间戳：整句退化为单段（块级 begin/end）
+    ev_plain = {"output": {"sentence": {"sentence_end": True, "begin_time": 760, "end_time": 3800, "text": "单句。"},
+                             "text": "单句。"}}
+    t3, s3 = asr._parse_funasr_events([ev_plain])
+    assert t3 == "单句。" and s3 == [{"start": 0.76, "end": 3.8, "text": "单句。"}]
+
+    # 无 sentence_end / 空事件 -> 空 segments（上层兑底合成）
+    _, s4 = asr._parse_funasr_events([{"output": {"text": "只有文本"}}])
+    assert s4 == []
+    assert asr._parse_funasr_events([]) == ("", [])
+
+    # 响应体提取：SSE 流 / 普通 JSON / 非法行兼容
+    sse_body = (
+        "id:1\nevent:result\n:HTTP_STATUS/200\n"
+        'data:{"output":{"text":"a"}}\n\n'
+        "id:2\nevent:result\n"
+        "data:not-json\n"
+        'data:{"output":{"text":"b"}}\n'
+    )
+    assert len(asr._collect_funasr_events(sse_body)) == 2
+    assert asr._collect_funasr_events('{"output":{}}') == [{"output": {}}]
+    assert asr._collect_funasr_events("") == []
+    print("[asr] funasr sse parse ok")
 
 
 def test_asr_synthesize_segments():
@@ -414,8 +501,10 @@ if __name__ == "__main__":
     test_parse_vtt()
     test_parse_srt()
     test_dedupe()
+    test_extract_chapters()
     test_apply_cookies()
     test_asr_chain()
     test_asr_synthesize_segments()
+    test_funasr_sse_parse()
     test_no_subtitle_hint()
     print("TRANSCRIBE & AI TEST PASSED")

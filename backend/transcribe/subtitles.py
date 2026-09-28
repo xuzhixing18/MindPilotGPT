@@ -169,6 +169,32 @@ def _pick_language(requested: dict[str, Any]) -> str | None:
     return langs[0] if langs else None
 
 
+def _extract_chapters(info: dict[str, Any]) -> list[dict[str, Any]]:
+    """平台原生章节（UP 主投稿章节）：归一化为 [{title, start, end}] 并按 start 排序。
+
+    yt-dlp 的 ``chapters`` 条目形如 {title, start_time, end_time}；缺标题/起始时间
+    或类型非法的条目直接丢弃；end 缺失时为 None（前端按下一章起点兜底）。
+    """
+    out: list[dict[str, Any]] = []
+    for ch in info.get("chapters") or []:
+        if not isinstance(ch, dict):
+            continue
+        title = (ch.get("title") or "").strip()
+        start = ch.get("start_time")
+        if not title or isinstance(start, bool) or not isinstance(start, (int, float)):
+            continue
+        end = ch.get("end_time")
+        out.append({
+            "title": title,
+            "start": round(float(start), 2),
+            "end": round(float(end), 2)
+            if isinstance(end, (int, float)) and not isinstance(end, bool)
+            else None,
+        })
+    out.sort(key=lambda c: c["start"])
+    return out
+
+
 def _cleanup(requested: dict[str, Any]) -> None:
     """删除下载到临时目录的字幕文件（用完即清）。"""
     for sub in requested.values():
@@ -220,6 +246,7 @@ def transcribe(url: str) -> dict[str, Any]:
         "language_name": sub.get("name") or lang,
         "source": "auto" if is_auto else "manual",
         "segments": segments,
+        "chapters": _extract_chapters(info),
         "text": text,
         "char_count": len(text),
         "webpage_url": info.get("webpage_url") or url,

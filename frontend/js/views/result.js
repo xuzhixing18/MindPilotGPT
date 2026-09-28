@@ -12,6 +12,43 @@ import {
   ICON, AI_CONFIG_HINT,
 } from '../core.js';
 import { addToCollection } from '../coll-picker.js';
+import { createPlayer, detectPlayer } from '../player.js';
+
+/* ---------- 左栏封面播放器：模块级共享控制器（字幕 Tab 联动） ----------
+ * 播放器不再内嵌在字幕 Tab 内部，而是在左栏封面区原位挂载：封面默认展示
+ * 海报 + 播放按钮，点击后 createPlayer 原位替换为 iframe；字幕时间戳 / 章节
+ * 点击时若播放器尚未挂载，则先按对应时间点挂载（自动播放）。控制器模块级
+ * 唯一，换卡时销毁旧实例；字幕面板通过 onPlayer 订阅保持同步。
+ */
+let playerCtrl = null;
+let playerSlot = null;   // { el, target, posterHtml }：当前卡左栏封面槽位
+const playerSubs = new Set();
+const onPlayer = (fn) => { playerSubs.add(fn); return () => playerSubs.delete(fn); };
+const setPlayerCtrl = (ctrl) => {
+  if (playerCtrl && playerCtrl !== ctrl) { try { playerCtrl.destroy(); } catch (e) { /* 已销毁 */ } }
+  playerCtrl = ctrl;
+  playerSubs.forEach((fn) => fn(ctrl));
+};
+/* 在左栏封面槽挂载播放器（sec=起播秒）；已挂载则直接 seek；失败恢复封面可重试。
+ * spinner 以 absolute 覆盖层展示：createPlayer 是 appendChild 追加 iframe，
+ * 若提前写入普通流的 spinner 会占满容器把 iframe 挤出可视区（aspect-video
+ * 固定高 + overflow-hidden），导致播放器被永远挡住。 */
+const mountLeftPlayer = async (sec) => {
+  if (playerCtrl) { playerCtrl.seek(sec); return playerCtrl; }
+  const slot = playerSlot;
+  if (!slot || !slot.el.isConnected) return null;
+  const spin = document.createElement('div');
+  spin.className = 'absolute inset-0 z-10 grid place-items-center bg-slate-100/95 text-xs text-slate-400';
+  spin.innerHTML = '<span class="inline-flex items-center gap-2"><span class="spinner"></span> 播放器加载中…</span>';
+  slot.el.innerHTML = '';   // 清掉海报/时长角标/播放按钮：它们都是 h-full，不清会把 iframe 挤出容器
+  slot.el.appendChild(spin);
+  const ctrl = await createPlayer(slot.el, slot.target, { sec, autoplay: true });
+  spin.remove();
+  if (!slot.el.isConnected) { if (ctrl) ctrl.destroy(); return null; }
+  if (ctrl) { setPlayerCtrl(ctrl); return ctrl; }
+  slot.el.innerHTML = slot.posterHtml;   // 挂载失败：恢复封面，可重试
+  return null;
+};
 
 /* ---------- Tab 常量（原 app.js 顶部定义，随结果卡迁入） ---------- */
 const TAB_ACTIVE = 'ai-tab -mb-px inline-flex min-w-fit flex-1 items-center justify-center gap-1.5 whitespace-nowrap border-b-2 border-brand-500 px-2 pb-3 pt-1 text-sm font-semibold text-brand-600';
@@ -78,11 +115,17 @@ const renderCard = (info, url, opts = {}) => {
         </button>`).join('')
     : '<div class="rounded-xl border border-dashed border-slate-200 p-4 text-center text-sm text-slate-400">无可用清晰度</div>';
 
+  const playerTarget = detectPlayer(url);
+
   const headHtml = `
           <div class="p-4">
-            <div class="relative aspect-video w-full overflow-hidden rounded-2xl bg-slate-100">
+            <div class="player-slot relative aspect-video w-full overflow-hidden rounded-2xl bg-slate-100">
               ${thumb}
               ${info.duration ? `<span class="absolute bottom-2 right-2 rounded bg-black/70 px-1.5 py-0.5 text-xs text-white">${fmtDuration(info.duration)}</span>` : ''}
+              ${playerTarget ? `
+              <button type="button" class="player-play absolute inset-0 grid place-items-center transition hover:bg-black/25" title="在页面内播放视频（与字幕时间戳联动）">
+                <span class="grid h-12 w-12 place-items-center rounded-full bg-white/90 text-brand-600 shadow-card transition hover:scale-105">${ICON.play}</span>
+              </button>` : ''}
             </div>
             <h3 class="mt-3 line-clamp-2 text-base font-bold leading-snug text-slate-900" title="${escapeHtml(info.title)}">${escapeHtml(info.title)}</h3>
             ${metaBits ? `<div class="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">${metaBits}</div>` : ''}
@@ -194,15 +237,26 @@ const renderSummary = (panel, data) => {
     </div>`;
 };
 
-const renderTranscript = (panel, data) => {
+/* ---------- 字幕工作台辅助：合段拼接 / 搜索高亮 ---------- */
+const escapeRegExp = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const CJK_TAIL = /[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]$/;
+const CJK_HEAD = /^[\u4e00-\u9fff]/;
+// 中日韩文相邻段直接拼接（不插空格），其余以空格连接，合段后读起来像自然段落
+const joinSegTexts = (arr) => arr
+  .map((s) => (s.text || '').trim())
+  .filter(Boolean)
+  .reduce((acc, t) => (acc ? acc + (CJK_TAIL.test(acc) && CJK_HEAD.test(t) ? '' : ' ') + t : t), '');
+
+/* ---------- 字幕脚本工作台：搜索筛选 / 分组滑杆 / 章节导航 / 播放器联动 ---------- */
+const renderTranscript = async (panel, data, url) => {
   const segs = data.segments || [];
-  const rows = segs
-    .map((seg) => `
-      <div class="flex gap-3 border-b border-slate-100 py-1.5 last:border-0">
-        <span class="shrink-0 font-mono text-xs text-brand-500">${fmtTs(seg.start)}</span>
-        <span class="text-sm leading-relaxed text-slate-600">${escapeHtml(seg.text)}</span>
-      </div>`)
-    .join('');
+  const chapters = (data.chapters || []).filter((c) => c && c.title && c.start != null);
+  // ASR 链路（无 CC 字幕视频）按句切分不含时间轴：时间戳列全部为空，需明确标识而非静默
+  const hasTimeline = segs.some((s) => s.start != null);
+  const st = { queryRaw: '', query: '', group: 1, follow: false, activeGi: -1, followTimer: null };
+  const target = detectPlayer(data.webpage_url || url);   // 平台能力判定（联动可用性 / 时间戳点击行为）
+  let ctrl = playerCtrl;   // 共享控制器（左栏封面可能已挂载）；onPlayer 订阅保持最新
+
   const badgeName = (data.language_name || '').split(' · ')[0];
   const langBadge = [badgeName, data.language].filter(Boolean).join(' · ');
   panel.innerHTML = `
@@ -212,6 +266,7 @@ const renderTranscript = (panel, data) => {
         <span class="text-sm text-slate-600">共 <b class="font-semibold text-slate-900">${segs.length}</b> 条字幕</span>
         ${langBadge ? `<span class="rounded-md bg-brand-50 px-2 py-0.5 text-xs font-semibold text-brand-600">${escapeHtml(langBadge)}</span>` : ''}
         ${data.cached ? '<span class="rounded-full bg-emerald-50 px-2 py-0.5 text-xs font-semibold text-emerald-600">已缓存</span>' : ''}
+        ${segs.length && !hasTimeline ? '<span class="rounded-full bg-amber-50 px-2 py-0.5 text-xs font-semibold text-amber-600" title="该视频无字幕，文本由语音识别（ASR）生成，不含时间轴：时间戳跳转与滚动联动不可用">ASR 转写·无时间轴</span>' : ''}
       </div>
       <div class="flex items-center gap-4 text-sm">
         <button type="button" class="sub-copy inline-flex items-center gap-1 font-semibold text-brand-600 transition hover:text-brand-700">${ICON.copy}复制</button>
@@ -225,9 +280,157 @@ const renderTranscript = (panel, data) => {
         <button type="button" class="sub-expand font-semibold text-brand-600 transition hover:text-brand-700">展开全部</button>
       </div>
     </div>
-    <div class="sub-body mt-3 min-h-0 flex-1 space-y-0.5 overflow-y-auto pr-2">${rows}</div>
+    <div class="mt-2 flex flex-wrap items-center gap-x-4 gap-y-2">
+      <input type="search" class="sub-q min-w-0 flex-1 rounded-xl border border-slate-200 px-3 py-1.5 text-sm outline-none focus:border-brand-400" placeholder="根据「字幕」筛选…" />
+      <label class="inline-flex shrink-0 items-center gap-2 text-xs text-slate-500">字幕分组
+        <input type="range" min="1" max="8" step="1" value="1" class="sub-group w-24 accent-brand-500" />
+        <span class="sub-group-label w-14 text-slate-600">不分组</span>
+      </label>
+      <button type="button" class="sub-follow shrink-0 rounded-full border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-500 transition" title="开启后字幕列表随播放进度自动滚动高亮（需平台播放器支持进度回读）">字幕滚动：关</button>
+    </div>
+    <div class="sub-chips mt-2 flex gap-1.5 overflow-x-auto pb-1 ${chapters.length ? '' : 'hidden'}"></div>
+    <div class="sub-body mt-2 min-h-0 flex-1 space-y-2 overflow-y-auto pr-2"></div>
     </div>`;
 
+  const listEl = panel.querySelector('.sub-body');
+  const chipsEl = panel.querySelector('.sub-chips');
+  const followBtn = panel.querySelector('.sub-follow');
+  const groupInput = panel.querySelector('.sub-group');
+  const groupLabel = panel.querySelector('.sub-group-label');
+
+  /* 搜索命中高亮：先按原文切分再转义，避免转义字符干扰匹配 */
+  const highlight = (text) => {
+    if (!st.query) return escapeHtml(text);
+    const re = new RegExp(escapeRegExp(st.queryRaw), 'gi');
+    let out = '';
+    let last = 0;
+    let m;
+    while ((m = re.exec(text)) !== null) {
+      out += escapeHtml(text.slice(last, m.index)) + '<mark class="sub-hit">' + escapeHtml(m[0]) + '</mark>';
+      last = m.index + m[0].length;
+      if (m.index === re.lastIndex) re.lastIndex += 1;   // 防零宽匹配死循环
+    }
+    return out + escapeHtml(text.slice(last));
+  };
+
+  /* 列表渲染：筛选 → 按滑杆粒度合段 → 行（时间戳可点） */
+  let posOf = new Map();   // seg → 筛选后位置（联动定位用）
+  const paintList = () => {
+    const filtered = st.query
+      ? segs.filter((s) => (s.text || '').toLowerCase().includes(st.query))
+      : segs;
+    posOf = new Map(filtered.map((s, i) => [s, i]));
+    const groups = [];
+    for (let i = 0; i < filtered.length; i += st.group) groups.push(filtered.slice(i, i + st.group));
+    if (!groups.length) {
+      listEl.innerHTML = `<div class="p-4 text-center text-sm text-slate-400">${st.query ? `未找到匹配「${escapeHtml(st.queryRaw)}」的字幕` : '无字幕内容'}</div>`;
+      return;
+    }
+    listEl.innerHTML = groups.map((g, gi) => {
+      const t = g[0].start;
+      const hasTs = t != null;
+      const tsTitle = !hasTs ? '该段无时间戳' : (ctrl ? '跳转播放并定位到该段' : (target ? '在左栏打开播放器并跳转到该段' : '定位到该段'));
+      return `
+      <div class="sub-row flex gap-3 rounded-xl border px-3 py-2.5 transition ${gi === st.activeGi ? 'sub-active' : ''}" data-gi="${gi}" data-start="${hasTs ? t : ''}">
+        <button type="button" class="sub-ts shrink-0 font-mono text-sm font-semibold text-sky-500 transition hover:underline ${hasTs ? '' : 'cursor-default opacity-50'}" data-t="${hasTs ? t : ''}" title="${tsTitle}">${hasTs ? fmtTs(t) : '—'}</button>
+        <span class="min-w-0 flex-1 text-sm leading-relaxed text-slate-700">${highlight(joinSegTexts(g))}</span>
+      </div>`;
+    }).join('');
+  };
+
+  const setActiveRow = (gi, scroll) => {
+    st.activeGi = gi;
+    listEl.querySelectorAll('.sub-row.sub-active').forEach((r) => r.classList.remove('sub-active'));
+    const row = gi >= 0 ? listEl.querySelector(`.sub-row[data-gi="${gi}"]`) : null;
+    if (row) {
+      row.classList.add('sub-active');
+      if (scroll) row.scrollIntoView({ block: 'nearest' });
+    }
+  };
+
+  /* 字幕滚动：轮询播放器进度 → 定位当前段 → 高亮 + 自动滚动 */
+  const stopFollow = () => {
+    if (st.followTimer) { clearInterval(st.followTimer); st.followTimer = null; }
+  };
+  const setFollow = (on) => {
+    st.follow = on;
+    stopFollow();
+    followBtn.textContent = `字幕滚动：${on ? '开' : '关'}`;
+    followBtn.className = `sub-follow shrink-0 rounded-full border px-3 py-1 text-xs font-semibold transition ${on ? 'border-brand-400 bg-brand-50 text-brand-600' : 'border-slate-200 text-slate-500'}`;
+    if (!on || !ctrl || !ctrl.canFollow) return;
+    st.followTimer = setInterval(() => {
+      if (!panel.isConnected) { stopFollow(); return; }
+      if (!ctrl || !ctrl.canFollow) return;   // 播放器尚未挂载（左栏封面未点击）：本轮跳过
+      const t = ctrl.getTime();
+      if (t == null) return;
+      let idx = -1;
+      for (let i = 0; i < segs.length; i += 1) {
+        const s = segs[i];
+        const start = s.start != null ? s.start : 0;
+        const next = segs[i + 1];
+        const end = s.end != null ? s.end : (next && next.start != null ? next.start : Infinity);
+        if (start <= t && t < end) { idx = i; break; }
+      }
+      if (idx < 0) return;
+      const pos = posOf.get(segs[idx]);
+      if (pos == null) return;   // 当前段被搜索过滤：不跳滚动位置
+      setActiveRow(Math.floor(pos / st.group), true);
+    }, 600);
+  };
+  const disableFollow = (hint) => {
+    setFollow(false);
+    followBtn.disabled = true;
+    followBtn.classList.add('cursor-not-allowed', 'opacity-50');
+    followBtn.title = hint;
+  };
+
+  /* 章节导航：跳转播放 + 定位字幕 + 选中态 */
+  if (chapters.length) {
+    chipsEl.innerHTML = chapters.map((c, i) => `
+      <button type="button" data-i="${i}" class="sub-chip shrink-0 rounded-full border border-slate-200 bg-white px-2.5 py-1 text-xs text-slate-600 transition hover:border-brand-300 hover:text-brand-600" title="跳转播放并定位字幕">
+        <span class="font-mono text-sky-500">${fmtTs(c.start)}</span> ${escapeHtml(c.title)}
+      </button>`).join('');
+  }
+  chipsEl.addEventListener('click', async (e) => {
+    const chip = e.target.closest('.sub-chip');
+    if (!chip) return;
+    const c = chapters[Number(chip.dataset.i)];
+    if (!c) return;
+    if (ctrl) ctrl.seek(c.start);
+    else if (target) await mountLeftPlayer(c.start);
+    chipsEl.querySelectorAll('.sub-chip').forEach((x) => x.classList.toggle('sub-chip-on', x === chip));
+    const rows = Array.from(listEl.querySelectorAll('.sub-row')).filter((r) => r.dataset.start !== '');
+    const row = rows.find((r) => Number(r.dataset.start) >= c.start - 0.5) || rows[rows.length - 1];
+    if (row) setActiveRow(Number(row.dataset.gi), true);
+  });
+
+  /* 工具栏：搜索 / 分组滑杆 / 字幕滚动开关 */
+  panel.querySelector('.sub-q').addEventListener('input', (e) => {
+    st.queryRaw = e.target.value.trim();
+    st.query = st.queryRaw.toLowerCase();
+    st.activeGi = -1;
+    paintList();
+  });
+  groupInput.addEventListener('input', () => {
+    st.group = Number(groupInput.value) || 1;
+    groupLabel.textContent = st.group === 1 ? '不分组' : `${st.group} 条/段`;
+    st.activeGi = -1;
+    paintList();
+  });
+  followBtn.addEventListener('click', () => { if (!followBtn.disabled) setFollow(!st.follow); });
+
+  /* 时间戳点击：播放器跳转（未挂载则先在左栏封面区挂载）+ 本段高亮 */
+  listEl.addEventListener('click', async (e) => {
+    const ts = e.target.closest('.sub-ts');
+    if (!ts || ts.dataset.t === '') return;
+    const t = Number(ts.dataset.t);
+    if (ctrl) ctrl.seek(t);
+    else if (target) await mountLeftPlayer(t);
+    const row = ts.closest('.sub-row');
+    setActiveRow(row ? Number(row.dataset.gi) : -1, false);
+  });
+
+  /* 复制 / 下载 / 展开（沿用既有行为） */
   const menu = panel.querySelector('.sub-dl-menu');
   panel.querySelector('.sub-dl').addEventListener('click', (e) => { e.stopPropagation(); menu.classList.toggle('hidden'); });
   panel.querySelectorAll('.sub-dl-opt').forEach((opt) => opt.addEventListener('click', () => {
@@ -255,13 +458,30 @@ const renderTranscript = (panel, data) => {
       done();
     }
   });
-  const body = panel.querySelector('.sub-body');
   const expandBtn = panel.querySelector('.sub-expand');
   expandBtn.addEventListener('click', () => {
-    const expanded = body.style.maxHeight === 'none';
-    body.style.maxHeight = expanded ? '' : 'none';
+    const expanded = listEl.style.maxHeight === 'none';
+    listEl.style.maxHeight = expanded ? '' : 'none';
     expandBtn.textContent = expanded ? '展开全部' : '收起';
   });
+
+  /* 订阅共享控制器：左栏封面挂载后刷新时间戳 title；滚动联动开启中则恢复轮询 */
+  const unsub = onPlayer((c) => {
+    if (!panel.isConnected) { unsub(); return; }
+    ctrl = c;
+    paintList();
+    if (st.follow && ctrl && ctrl.canFollow) setFollow(true);
+  });
+
+  paintList();
+
+  /* 滚动联动可用性由平台能力决定：B站外链播放器无进度回读；无嵌入播放器平台仅字幕内定位；
+   * YouTube 未挂载时轮询自动空转，封面挂载后经订阅回调恢复联动 */
+  if (!target || target.platform !== 'youtube') {
+    disableFollow(target && target.platform === 'bilibili'
+      ? 'B站外链播放器不回读播放进度，滚动联动不可用；点击时间戳跳转正常'
+      : '该平台无可嵌入播放器：时间戳仅用于字幕内定位');
+  }
 };
 
 /* ---------- 思维导图渲染（无第三方库，CSS 缩进树，递归） ---------- */
@@ -471,7 +691,7 @@ const loadSummary = async (url, panel) => {
 
 const loadTranscript = async (url, panel) => {
   const hit = txCache.get(url);
-  if (hit) { renderTranscript(panel, { ...hit, cached: true }); return true; }
+  if (hit) { await renderTranscript(panel, { ...hit, cached: true }, url); return true; }
   const stop = panelLoading(panel, [
     '正在提取字幕…', '若该视频无字幕，正在下载音频并识别语音…', '快好了…',
   ]);
@@ -479,7 +699,7 @@ const loadTranscript = async (url, panel) => {
     const { res, data } = await dedup('tx:' + url, () => postJson('/api/transcribe', { url }));
     if (!res.ok) { panelError(panel, data.detail || `转写失败 (HTTP ${res.status})`); return false; }
     txCache.set(url, data);
-    renderTranscript(panel, data);
+    await renderTranscript(panel, data, url);
     return true;
   } catch (e) {
     panelError(panel, e.message || '网络错误，转写失败');
@@ -609,6 +829,16 @@ const bindCard = (cardEl, url) => {
   const status = cardEl.querySelector('.dl-status');
   cardEl._aiState = { loaded: new Set() };
   bindSplitter(cardEl);
+
+  /* 左栏封面播放器槽位：点封面播放按钮 → 原位挂载嵌入播放器（字幕 Tab 共享控制器） */
+  setPlayerCtrl(null);   // 换卡：销毁旧播放器
+  const slotEl = cardEl.querySelector('.player-slot');
+  const slotTarget = detectPlayer(url);
+  playerSlot = slotEl && slotTarget ? { el: slotEl, target: slotTarget, posterHtml: slotEl.innerHTML } : null;
+  if (slotEl) slotEl.addEventListener('click', (e) => {
+    if (!e.target.closest('.player-play')) return;
+    mountLeftPlayer(0);
+  });
 
   const fmtCards = Array.from(cardEl.querySelectorAll('.format-card'));
   const selectFormat = (btn) => {
