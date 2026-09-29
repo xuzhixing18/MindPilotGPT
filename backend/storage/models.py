@@ -409,3 +409,70 @@ class CollectionItem(Base):
     url: Mapped[str] = mapped_column(Text, default="", comment="原始链接快照")
     title: Mapped[str] = mapped_column(Text, default="", comment="标题快照")
     added_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class UserNote(Base):
+    """随手笔记（私有）：同一视频允许多篇，``body`` 为 Markdown 源文唯一事实源。
+
+    与 ``UserHistory`` 只记归属不同，笔记是**内容本体**：正文、图片计数、时间戳
+    索引都存在本表。``marks`` 由服务端从 ``body`` 解析生成（不信任客户端上报），
+    供时间线聚合与导出免全文正则。``updated_at`` 兼作自动保存的乐观并发基线。
+    """
+
+    __tablename__ = "user_notes"
+    __table_args__ = (
+        Index("ix_user_notes_user_updated", "user_id", "updated_at"),
+        Index("ix_user_notes_user_content", "user_id", "content_key"),
+        {"comment": "用户随手笔记（私有，一视频多篇，按 user_id 列级隔离）"},
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, comment="uuid4 hex")
+    user_id: Mapped[str] = mapped_column(String(32), comment="归属用户")
+    content_key: Mapped[str] = mapped_column(String(64), default="", comment="视频身份键 = transcript_key(url)")
+    url: Mapped[str] = mapped_column(Text, default="", comment="视频链接快照（缓存过期后笔记仍可读）")
+    title: Mapped[str] = mapped_column(Text, default="", comment="视频标题快照")
+    body: Mapped[str] = mapped_column(Text, default="", comment="Markdown 源文（唯一事实源，前端渲染）")
+    marks: Mapped[list[Any]] = mapped_column(
+        JSONCol, default=list,
+        comment="时间戳索引 [{t,label}]，写库时由服务端从 body 解析",
+    )
+    tag: Mapped[str] = mapped_column(
+        String(16), default="", server_default="",
+        comment="语义标签：空 / key重点 / question疑问 / idea灵感（P1 过滤用，P0 预留）",
+    )
+    starred: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false(), comment="收藏（P1 预留）")
+    source_type: Mapped[str] = mapped_column(
+        String(16), default="manual", server_default="manual",
+        comment="来源：manual / subtitle / chapter / qa / ai_draft",
+    )
+    source_ref: Mapped[str] = mapped_column(String(64), default="", server_default="", comment="引用来源锚点（如 qa_messages.id），仅溯源展示")
+    image_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0", comment="图片数冗余计数（列表卡片免 join）")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow,
+        comment="最近保存时间（列表排序键 + 自动保存冲突基线）",
+    )
+
+
+class NoteImage(Base):
+    """笔记图片（私有）：独立落盘而非 base64 塞正文，支持配额与孤儿清扫。
+
+    ``id`` 即文件名（uuid4 hex，防路径穿越）；``note_id`` 可空——「新建未保存时
+    贴图」的图片先落地，由 service 在笔记首次保存时认领。``t`` 为截图对应的
+    视频时间点（用户贴图为 NULL）。"""
+
+    __tablename__ = "note_images"
+    __table_args__ = (
+        Index("ix_note_images_user_created", "user_id", "created_at"),
+        Index("ix_note_images_note", "note_id"),
+        {"comment": "笔记图片（私有，文件存 data/note_images，读取需鉴权）"},
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, comment="uuid4 hex，同时是文件名")
+    user_id: Mapped[str] = mapped_column(String(32), comment="归属用户")
+    note_id: Mapped[str | None] = mapped_column(String(32), nullable=True, comment="归属笔记；空=尚未被认领（孤儿候选）")
+    content_key: Mapped[str] = mapped_column(String(64), default="", comment="视频身份键（认领与清扫依据）")
+    t: Mapped[float | None] = mapped_column(Float, nullable=True, comment="截图时间点（秒）；非截图为 NULL")
+    mime: Mapped[str] = mapped_column(String(32), default="", comment="由魔数判定的真实 MIME")
+    bytes: Mapped[int] = mapped_column(Integer, default=0, comment="体积（配额与清扫依据）")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, comment="孤儿判定依据")

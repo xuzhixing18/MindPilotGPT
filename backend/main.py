@@ -41,7 +41,7 @@ _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from backend import ai, auth, comments, downloader, library, storage, transcribe
+from backend import ai, auth, comments, downloader, library, notes, storage, transcribe
 from backend.downloader.common import DOWNLOAD_DIR
 
 # 前端静态目录：项目根目录下的 frontend/
@@ -69,6 +69,11 @@ app.include_router(auth.router)
 # 门禁不看灰度开关——私有资源永远要求登录；跨用户访问统一 404。
 app.add_exception_handler(library.LibraryError, library.library_error_handler)
 app.include_router(library.router)
+
+# 随手笔记包（笔记/图片/抽帧）：/api/me/notes/* 路由与语义化异常处理器（含 409 冲突）。
+# 同样永远要求登录；抽帧端点经 set_stream_cache_lookup 复用进程内流播缓存（只查不下载）。
+app.add_exception_handler(notes.NotesError, notes.notes_error_handler)
+app.include_router(notes.router)
 
 # 业务端点统一门禁（/api/health 与 /api/auth/* 不在此列，保持开放以供前端探测与登录）：
 #   AUTH_ENABLED=false（默认）              → 完全放行，行为与改造前一致；
@@ -303,6 +308,27 @@ def _stream_file(url: str) -> Path:
         return dest
 
     return _stream_flight.run(key, work)
+
+
+# 抽帧端点的流播缓存查询：只查不下载（笔记截图「本地快通道」）。用户在线播放过的
+# 视频已落盘缓存，后端 ffmpeg 可直接抽帧；未命中（如 B站/YouTube iframe 播放器从不
+# 经后端）由 notes.frames 转远程直连抽帧，再失败降级封面。
+notes.set_stream_cache_lookup(lambda url: _stream_cached_file(url))
+
+
+def _stream_cached_file(url: str) -> Path | None:
+    """查询 url 的流播缓存文件（存在且磁盘在才返回），绝不触发下载。"""
+    hit = _stream_cache.get(storage.normalize_url(url))
+    if hit and hit.exists():
+        return hit
+    # 进程重启后 _stream_cache 重建：按磁盘命名规则补查一次（sha1(normalized_url)）
+    key = storage.normalize_url(url)
+    if not key:
+        return None
+    for p in _STREAM_DIR.glob(f"{sha1(key.encode()).hexdigest()}.*"):
+        if p.is_file():
+            return p
+    return None
 
 
 _RANGE_RE = re.compile(r"bytes=(\d*)-(\d*)")

@@ -13,8 +13,8 @@ from backend.library import config, store
 from backend.library.errors import CapExceededError, NotFoundError, ValidationError
 from backend.storage import transcript_key
 
-# 历史记录的内容类型（与前端 Tab 一一对应）
-KINDS = ("transcribe", "summary", "mindmap", "comments", "qa")
+# 历史记录的内容类型（与前端 Tab 一一对应；note 由 notes 包写入——随手笔记）
+KINDS = ("transcribe", "summary", "mindmap", "comments", "qa", "note")
 
 
 # --------------------------------------------------------------------------- #

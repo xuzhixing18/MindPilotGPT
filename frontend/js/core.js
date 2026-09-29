@@ -87,6 +87,7 @@ export const sumCache = new Map();      // url -> 总结响应
 export const mindmapCache = new Map();  // url -> 思维导图响应
 export const commentsCache = new Map(); // url -> 高赞评论响应
 export const qaCache = new Map();       // url -> { messages, sessionId } 问答会话（多轮，切 Tab 保留）
+export const notesCache = new Map();    // content_key -> 笔记列表（按用户私有，换账号必须清空）
 const inflight = new Map();             // `${type}:${url}` -> Promise
 
 /* ---------- 轻量事件总线：解耦 401 / 登录态变更 / 侧边栏刷新 ---------- */
@@ -101,10 +102,10 @@ export const bus = {
   emit(event, payload) { const s = listeners.get(event); if (s) s.forEach((fn) => fn(payload)); },
 };
 
-// 登录态一旦变化（登出 / 换号 / 会话失效）即清空「按用户私有」的问答会话缓存：
-// qaCache 里存着上一账号的对话与 session_id，不清会串到下一个账号。
+// 登录态一旦变化（登出 / 换号 / 会话失效）即清空「按用户私有」的问答会话与笔记缓存：
+// qaCache 里存着上一账号的对话与 session_id，notesCache 存着上一账号的笔记，不清会串号。
 // （转写/总结/导图/评论缓存是全局内容缓存，与用户无关，故保留。）
-bus.on('auth:changed', () => { qaCache.clear(); });
+bus.on('auth:changed', () => { qaCache.clear(); notesCache.clear(); });
 
 // 401 统一处理回调（auth-ui 注册）：清态 → 弹登录框
 let unauthorizedHandler = null;
@@ -198,9 +199,21 @@ export const me = {
   session: (id) => getJson(`/api/me/qa/sessions/${encodeURIComponent(id)}`),
   renameSession: (id, title) => meFetch(`/api/me/qa/sessions/${encodeURIComponent(id)}`, { method: 'PATCH', body: { title } }),
   deleteSession: (id) => meFetch(`/api/me/qa/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  // 随手笔记（/api/me/notes/*）：patchNote 的 409 冲突响应体（服务端版本）经 err.data 透传
+  notes: (params = {}) => {
+    const qs = new URLSearchParams(Object.entries(params).filter(([, v]) => v !== '' && v != null));
+    return getJson(`/api/me/notes?${qs.toString()}`);
+  },
+  createNote: (body) => meFetch('/api/me/notes', { method: 'POST', body }),
+  note: (id) => getJson(`/api/me/notes/${encodeURIComponent(id)}`),
+  patchNote: (id, patch) => meFetch(`/api/me/notes/${encodeURIComponent(id)}`, { method: 'PATCH', body: patch }),
+  deleteNote: (id) => meFetch(`/api/me/notes/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  deleteNoteImage: (id) => meFetch(`/api/me/notes/images/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  captureFrame: (url, t) => meFetch('/api/me/notes/frames', { method: 'POST', body: { url, t } }),
 };
 
-// 私有资源写操作：成功返回 data，失败抛带 status 的 Error（401 已触发登录框）
+// 私有资源写操作：成功返回 data，失败抛带 status 的 Error（401 已触发登录框）；
+// 错误响应体整体挂在 err.data（409 冲突的服务端版本等结构化信息由此透传）。
 async function meFetch(path, { method = 'GET', body } = {}) {
   const res = await fetch(path, {
     method,
@@ -212,6 +225,7 @@ async function meFetch(path, { method = 'GET', body } = {}) {
   if (!res.ok) {
     const err = new Error(data.detail || `请求失败 (HTTP ${res.status})`);
     err.status = res.status;
+    err.data = data;
     throw err;
   }
   return data;
@@ -342,7 +356,7 @@ export const ICON = {
 export const AI_CONFIG_HINT = '请复制 .env.example 为 .env 并填入 API Key 后重启服务。';
 
 /* ---------- 历史 kinds 徽标（侧边栏 / 历史列表 / 合集详情共用） ----------
- * kinds 取值与后端 library.service.KINDS 一致：transcribe/summary/mindmap/comments/qa。
+ * kinds 取值与后端 library.service.KINDS 一致：transcribe/summary/mindmap/comments/qa/note。
  */
 export const KIND_META = {
   summary: { short: '总', full: '总结摘要', cls: 'bg-brand-50 text-brand-600' },
@@ -350,6 +364,7 @@ export const KIND_META = {
   mindmap: { short: '导', full: '思维导图', cls: 'bg-indigo-50 text-indigo-600' },
   comments: { short: '评', full: '高赞评论', cls: 'bg-amber-50 text-amber-600' },
   qa: { short: '问', full: 'AI 问答', cls: 'bg-rose-50 text-rose-600' },
+  note: { short: '记', full: '随手笔记', cls: 'bg-cyan-50 text-cyan-600' },
 };
 // kinds 数组 → 一排小徽标 HTML（未知 kind 忽略；空则返回 ''）
 export const kindBadges = (kinds) => (kinds || [])

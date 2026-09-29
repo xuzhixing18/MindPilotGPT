@@ -40,3 +40,36 @@ html, body {
 .sub-active .sub-ts { font-weight: 700; }
 mark.sub-hit { background: #FDE68A; border-radius: 2px; padding: 0 1px; }
 .sub-chip-on { border-color: #93C5FD; background: #EFF6FF; color: #2563EB; }
+
+/* 随手笔记：列表项选中态 / 时间戳徽标 / 预览排版 */
+.notes-item { border-color: #E2E8F0; background: #FFFFFF; cursor: pointer; }
+.notes-item:hover { border-color: #CBD5E1; }
+.note-item-on { border-color: #67E8F9; background: #ECFEFF; }
+/* 预览内时间戳：灰盘红针时钟 + 等宽时间（对齐竞品样式），点击可跳播 */
+.note-ts {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: #334155;
+  background: transparent;
+  border-radius: 0.4rem;
+  padding: 0 3px;
+  margin: 0 1px;
+  line-height: 1.4;
+  transition: background .15s;
+}
+.note-ts svg { width: 15px; height: 15px; flex: none; }
+.note-ts:hover { background: #F1F5F9; }
+.note-md { font-size: 0.875rem; line-height: 1.7; color: #334155; }
+.note-md .note-h1 { font-size: 1.05rem; font-weight: 700; color: #0F172A; margin: 0.7em 0 0.3em; }
+.note-md .note-h2 { font-size: 0.95rem; font-weight: 700; color: #1E293B; margin: 0.6em 0 0.25em; }
+.note-md .note-h3 { font-size: 0.9rem; font-weight: 600; color: #334155; margin: 0.5em 0 0.2em; }
+.note-md .note-p { margin: 0.35em 0; }
+.note-md .note-ul { list-style: disc; padding-left: 1.3em; margin: 0.35em 0; }
+.note-md .note-quote { border-left: 3px solid #A5F3FC; background: #F0FDFA; color: #475569; padding: 0.3em 0.7em; margin: 0.45em 0; border-radius: 0 0.4rem 0.4rem 0; }
+.note-md .note-code { font-family: ui-monospace, Consolas, monospace; font-size: 0.8em; background: #F1F5F9; border-radius: 4px; padding: 1px 4px; color: #BE123C; }
+.note-md .note-link { color: #0891B2; text-decoration: underline; text-underline-offset: 2px; }
+.note-md .note-img { max-width: 100%; border-radius: 0.6rem; border: 1px solid #E2E8F0; margin: 0.4em 0; }

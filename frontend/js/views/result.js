@@ -14,6 +14,7 @@ import {
 } from '../core.js';
 import { addToCollection } from '../coll-picker.js';
 import { createPlayer, detectPlayer, mountNative } from '../player.js';
+import { renderNotesPanel } from './notes.js';
 
 /* ---------- 左栏封面播放器：模块级共享控制器（字幕 Tab 联动） ----------
  * 播放器不再内嵌在字幕 Tab 内部，而是在左栏封面区原位挂载：封面默认展示
@@ -77,14 +78,16 @@ const TAB_IDLE = 'ai-tab -mb-px inline-flex min-w-fit flex-1 items-center justif
 const FMT_BASE = 'format-card flex w-full items-center gap-3 rounded-2xl border p-3 text-left transition';
 const FMT_ON = 'border-brand-400 bg-brand-50';
 const FMT_OFF = 'border-slate-200 bg-white hover:border-brand-300';
-const TAB_ORDER = ['summary', 'transcript', 'mindmap', 'comments', 'qa'];
-const TAB_LABELS = { summary: '总结摘要', transcript: '字幕文本', mindmap: '思维导图', comments: '高赞评论', qa: 'AI 问答' };
+/* notes Tab 只在单条完整卡中提供（批量 compact 卡无左栏播放器，时间戳/截图联动无意义） */
+const TAB_ORDER = ['summary', 'transcript', 'mindmap', 'comments', 'qa', 'notes'];
+const TAB_LABELS = { summary: '总结摘要', transcript: '字幕文本', mindmap: '思维导图', comments: '高赞评论', qa: 'AI 问答', notes: '随手笔记' };
 const TAB_ICONS = {
   summary: '<svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3l1.9 4.6L18.5 9.5l-4.6 1.9L12 16l-1.9-4.6L5.5 9.5l4.6-1.9L12 3z"/></svg>',
   transcript: '<svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 15h4M13 15h4M7 11h10"/></svg>',
   mindmap: '<svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="5" r="2"/><circle cx="5" cy="18" r="2"/><circle cx="19" cy="18" r="2"/><path d="M12 7v4M12 11l-6 5M12 11l6 5"/></svg>',
   comments: '<svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 9V5a3 3 0 00-6 0v4H5a2 2 0 00-2 2l1 8a2 2 0 002 2h11a2 2 0 002-1.6l1.2-7A2 2 0 0018.2 9H14z"/><path d="M8 9v12"/></svg>',
   qa: '<svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>',
+  notes: '<svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>',
 };
 const tabButton = (tab, active) =>
   `<button type="button" role="tab" data-tab="${tab}" aria-selected="${active ? 'true' : 'false'}" class="${active ? TAB_ACTIVE : TAB_IDLE}">${TAB_ICONS[tab]}<span>${TAB_LABELS[tab]}</span></button>`;
@@ -162,11 +165,13 @@ const renderCard = (info, url, opts = {}) => {
             <div class="dl-status hidden text-sm"></div>
           </div>`;
 
+  // notes 为登录后私有内容 Tab，不参与一键分析预取（runAllAi 仍只跑 AI 三件套）
+  const tabs = compact ? TAB_ORDER.filter((t) => t !== 'notes') : TAB_ORDER;
   const panelHtml = `
         <div role="tablist" aria-label="AI 分析" class="flex w-full gap-1 overflow-x-auto border-b border-slate-200 px-2 pt-2">
-          ${TAB_ORDER.map((t) => tabButton(t, t === 'transcript')).join('')}
+          ${tabs.map((t) => tabButton(t, t === 'transcript')).join('')}
         </div>
-        ${TAB_ORDER.map((t) => `<div role="tabpanel" data-panel="${t}" class="ai-tabpanel${t === 'transcript' ? '' : ' hidden'} flex min-h-0 flex-1 flex-col p-4 sm:p-5"></div>`).join('')}`;
+        ${tabs.map((t) => `<div role="tabpanel" data-panel="${t}" class="ai-tabpanel${t === 'transcript' ? '' : ' hidden'} flex min-h-0 flex-1 flex-col p-4 sm:p-5"></div>`).join('')}`;
 
   // 批量 compact：单列卡片，右栏默认隐藏（点「一键 AI 分析」再展开）
   if (compact) {
@@ -1018,7 +1023,21 @@ const loadComments = async (url, panel) => {
 
 const loadQA = (url, panel) => { renderQA(panel, url); return true; };
 
-const TAB_LOADERS = { summary: loadSummary, transcript: loadTranscript, mindmap: loadMindmap, comments: loadComments, qa: loadQA };
+/* 随手笔记：播放器能力经 ctx 注入（playerCtrl/mountLeftPlayer 是本模块私有单例）。
+ * 缓存命中由 notes.js 内部处理（notesCache 按 content_key 存，随 auth:changed 清空）。 */
+const loadNotes = (url, panel, card) => {
+  renderNotesPanel(panel, {
+    contentKey: card.dataset.contentKey || '',
+    url,
+    title: card.dataset.title || '',
+    getCtrl: () => playerCtrl,
+    onPlayer,
+    mountPlayer: (sec) => mountLeftPlayer(sec),
+  });
+  return true;
+};
+
+const TAB_LOADERS = { summary: loadSummary, transcript: loadTranscript, mindmap: loadMindmap, comments: loadComments, qa: loadQA, notes: loadNotes };
 
 /* ---------- Tab 切换：懒加载 + 防重复请求 ---------- */
 const activateTab = (card, tab) => {
@@ -1039,7 +1058,7 @@ const switchTab = async (card, url, tab) => {
   st.loaded.add(tab);
   const panel = card.querySelector(`.ai-tabpanel[data-panel="${tab}"]`);
   let ok = true;
-  try { ok = await TAB_LOADERS[tab](url, panel); }
+  try { ok = await TAB_LOADERS[tab](url, panel, card); }
   catch (e) { ok = false; panelError(panel, e.message || '加载失败'); }
   if (ok === false) st.loaded.delete(tab);
 };
@@ -1050,7 +1069,7 @@ const prefetchTab = (card, url, tab) => {
   st.loaded.add(tab);
   const panel = card.querySelector(`.ai-tabpanel[data-panel="${tab}"]`);
   return Promise.resolve()
-    .then(() => TAB_LOADERS[tab](url, panel))
+    .then(() => TAB_LOADERS[tab](url, panel, card))
     .then((ok) => { if (ok === false) st.loaded.delete(tab); return ok; })
     .catch((e) => { st.loaded.delete(tab); panelError(panel, e.message || '加载失败'); return false; });
 };
