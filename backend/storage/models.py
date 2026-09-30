@@ -476,3 +476,50 @@ class NoteImage(Base):
     mime: Mapped[str] = mapped_column(String(32), default="", comment="由魔数判定的真实 MIME")
     bytes: Mapped[int] = mapped_column(Integer, default=0, comment="体积（配额与清扫依据）")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, comment="孤儿判定依据")
+
+
+class Share(Base):
+    """分享（公开落地快照）：短链码 ``code`` 寻址，接收者匿名可读。
+
+    与私有资源相反：分享是**显式公开动作**，快照字段（标题/封面/要点）在创建时
+    拼装落库，全局缓存过期后落地页仍可读（同 UserHistory 快照语义）。``kind``
+    承载分享载体（整视频或单个分析 Tab），``ref_id`` 为 notes/qa 载体的对象 id
+    （幂等键成员）。``user_id`` 仅用于所有者管理（列表/撤销），公开响应永不输出。
+    """
+
+    __tablename__ = "shares"
+    __table_args__ = (
+        UniqueConstraint("code", name="uq_shares_code"),
+        Index("ix_shares_user_created", "user_id", "created_at"),
+        Index("ix_shares_content", "content_key"),
+        {"comment": "用户分享（公开短链落地页快照，code 防枚举 base62）"},
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, comment="uuid4 hex")
+    code: Mapped[str] = mapped_column(
+        String(12), comment="短链码（base62×10，secrets 生成）：公开寻址只用它，id 不外泄",
+    )
+    user_id: Mapped[str] = mapped_column(String(32), default="", comment="创建者（私有管理用；空串=运营官方分享预留）")
+    content_key: Mapped[str] = mapped_column(String(64), default="", comment="视频身份键 = transcript_key(url)")
+    kind: Mapped[str] = mapped_column(
+        String(16), default="video", server_default="video",
+        comment="分享载体：video / summary / transcript / mindmap / comments / qa / notes",
+    )
+    ref_id: Mapped[str] = mapped_column(
+        String(32), default="", server_default="", comment="载体对象 id（notes 笔记 id / qa 会话 id），幂等键成员",
+    )
+    title: Mapped[str] = mapped_column(Text, default="", comment="视频标题快照")
+    thumb_url: Mapped[str] = mapped_column(Text, default="", comment="封面快照（公开经 /api/share/{code}/thumb 同源代理）")
+    excerpt: Mapped[str] = mapped_column(Text, default="", comment="摘要快照（≤500 字，落地页与海报共用）")
+    payload: Mapped[dict[str, Any]] = mapped_column(
+        JSONCol, default=dict,
+        comment="载体快照：bullets/top_nodes/comments/qa/model_label/normalized_url 等（服务端已截断消毒）",
+    )
+    view_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0", comment="浏览量（IP 窗口去重后累加）")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    revoked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, comment="撤销时间；非空 → 落地页 410",
+    )
+    expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, comment="过期时间预留（P0 不使用）",
+    )

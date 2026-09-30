@@ -9,12 +9,13 @@ import {
   postJson, dedup, markUnauthorized,
   txCache, sumCache, mindmapCache, commentsCache, qaCache,
   triggerDownload, buildSubtitleText, downloadText, downloadBlob, copyText, buildMindmapMarkdown,
-  downloadSvg, downloadSvgPng,
+  downloadSvg, downloadSvgPng, toast,
   ICON, AI_CONFIG_HINT,
 } from '../core.js';
 import { addToCollection } from '../coll-picker.js';
 import { createPlayer, detectPlayer, mountNative } from '../player.js';
-import { renderNotesPanel } from './notes.js';
+import { renderNotesPanel, getNotesShareSnapshot } from './notes.js';
+import { openShare } from '../share.js';
 
 /* ---------- 左栏封面播放器：模块级共享控制器（字幕 Tab 联动） ----------
  * 播放器不再内嵌在字幕 Tab 内部，而是在左栏封面区原位挂载：封面默认展示
@@ -158,18 +159,24 @@ const renderCard = (info, url, opts = {}) => {
           </div>`;
 
   const actionsHtml = `
-          <div class="flex shrink-0 flex-col gap-2 border-t border-slate-100 p-4">
-            <button class="dl-btn inline-flex items-center justify-center gap-2 rounded-2xl bg-brand-500 px-6 py-3 text-sm font-bold text-white shadow-glow transition hover:bg-brand-600 active:scale-95">${ICON.dl}立即下载</button>
-            <button class="ai-btn inline-flex items-center justify-center gap-2 rounded-2xl border border-brand-200 bg-white px-6 py-3 text-sm font-semibold text-brand-600 transition hover:bg-brand-50 active:scale-95">${ICON.spark}一键 AI 分析</button>
-            <button class="coll-btn inline-flex items-center justify-center gap-2 rounded-2xl border border-slate-200 bg-white px-6 py-2.5 text-sm font-semibold text-slate-600 transition hover:border-brand-300 hover:text-brand-600 active:scale-95"><svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7z"/><path d="M12 11v4M10 13h4"/></svg>加入合集</button>
-            <div class="dl-status hidden text-sm"></div>
+          <div class="shrink-0 border-t border-slate-100 p-4">
+            <div class="grid grid-cols-2 gap-2">
+              <button class="dl-btn inline-flex items-center justify-center gap-2 rounded-2xl bg-brand-500 px-3 py-2.5 text-sm font-bold text-white shadow-glow transition hover:bg-brand-600 active:scale-95">${ICON.dl}立即下载</button>
+              <button class="ai-btn inline-flex items-center justify-center gap-2 rounded-2xl border border-brand-200 bg-white px-3 py-2.5 text-sm font-semibold text-brand-600 transition hover:bg-brand-50 active:scale-95">${ICON.spark}一键 AI 分析</button>
+              <button class="coll-btn inline-flex items-center justify-center gap-2 rounded-2xl border border-slate-200 bg-white px-3 py-2.5 text-sm font-semibold text-slate-600 transition hover:border-brand-300 hover:text-brand-600 active:scale-95"><svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7z"/><path d="M12 11v4M10 13h4"/></svg>加入合集</button>
+              <button class="share-btn inline-flex items-center justify-center gap-2 rounded-2xl border border-slate-200 bg-white px-3 py-2.5 text-sm font-semibold text-slate-600 transition hover:border-brand-300 hover:text-brand-600 active:scale-95" title="分享原视频与各 Tab（可多选，海报/短链/多渠道）">${ICON.share}分享</button>
+            </div>
+            <div class="dl-status mt-2 text-sm"></div>
           </div>`;
 
   // notes 为登录后私有内容 Tab，不参与一键分析预取（runAllAi 仍只跑 AI 三件套）
   const tabs = compact ? TAB_ORDER.filter((t) => t !== 'notes') : TAB_ORDER;
   const panelHtml = `
-        <div role="tablist" aria-label="AI 分析" class="flex w-full gap-1 overflow-x-auto border-b border-slate-200 px-2 pt-2">
-          ${tabs.map((t) => tabButton(t, t === 'transcript')).join('')}
+        <div class="flex items-stretch border-b border-slate-200">
+          <div role="tablist" aria-label="AI 分析" class="flex min-w-0 flex-1 gap-1 overflow-x-auto px-2 pt-2">
+            ${tabs.map((t) => tabButton(t, t === 'transcript')).join('')}
+          </div>
+          <button type="button" class="tab-share-btn mb-2 mr-3 inline-flex shrink-0 items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-500 transition hover:border-brand-300 hover:text-brand-600" data-tab="transcript" title="分享当前 Tab，弹窗内可全选/多选 Tab">${ICON.share}<span>分享 · 字幕文本</span></button>
         </div>
         ${tabs.map((t) => `<div role="tabpanel" data-panel="${t}" class="ai-tabpanel${t === 'transcript' ? '' : ' hidden'} flex min-h-0 flex-1 flex-col p-4 sm:p-5"></div>`).join('')}`;
 
@@ -205,6 +212,11 @@ const renderCard = (info, url, opts = {}) => {
       </div>
     </div>`;
 };
+
+/* 面板右上角分享入口（图三样式）：事件统一走 bindCard 的卡片级委托，
+ * 面板 innerHTML 重渲染后无需重新接线；notes.js 内同构内联（避免循环依赖） */
+const panelShareBtnHtml = () =>
+  `<button type="button" class="panel-share-btn inline-flex shrink-0 items-center gap-1 text-sm font-bold text-brand-600 transition hover:text-brand-700" title="分享本 Tab，弹窗内可全选/多选 Tab">${ICON.share}分享</button>`;
 
 /* ---------- AI 面板：加载 / 错误 ---------- */
 const panelLoading = (panel, textOrStages) => {
@@ -249,7 +261,10 @@ const renderSummary = (panel, data) => {
         AI 总结
         ${(data.cached || s.cached) ? '<span class="rounded-full bg-emerald-50 px-2 py-0.5 text-xs font-semibold text-emerald-600">秒开·已缓存</span>' : ''}
       </h4>
-      ${s.model ? `<span class="text-xs text-slate-400">${escapeHtml(s.model)}</span>` : ''}
+      <div class="flex items-center gap-3">
+        ${s.model ? `<span class="text-xs text-slate-400">${escapeHtml(s.model)}</span>` : ''}
+        ${panelShareBtnHtml()}
+      </div>
     </div>
     ${s.one_line ? `<p class="mt-3 text-sm font-semibold text-brand-700">${escapeHtml(s.one_line)}</p>` : ''}
     ${s.summary ? `<p class="mt-2 text-sm leading-relaxed text-slate-600">${escapeHtml(s.summary)}</p>` : ''}
@@ -292,6 +307,7 @@ const renderTranscript = async (panel, data, url) => {
         ${segs.length && !hasTimeline ? '<span class="rounded-full bg-amber-50 px-2 py-0.5 text-xs font-semibold text-amber-600" title="该视频无字幕，文本由语音识别（ASR）生成，不含时间轴：时间戳跳转与滚动联动不可用">ASR 转写·无时间轴</span>' : ''}
       </div>
       <div class="flex items-center gap-4 text-sm">
+        ${panelShareBtnHtml()}
         <button type="button" class="sub-copy inline-flex items-center gap-1 font-semibold text-brand-600 transition hover:text-brand-700">${ICON.copy}复制</button>
         <div class="relative">
           <button type="button" class="sub-dl inline-flex items-center gap-1 font-semibold text-brand-600 transition hover:text-brand-700">${ICON.dl}下载字幕${ICON.caret}</button>
@@ -670,6 +686,7 @@ const renderMindmap = (panel, data, url) => {
       <div class="flex items-center gap-2 text-sm">
         <span class="mm-err text-xs text-rose-500"></span>
         ${mm.model ? `<span class="text-xs text-slate-400">${escapeHtml(mm.model)}</span>` : ''}
+        ${panelShareBtnHtml()}
         <button type="button" class="mm-refresh inline-flex items-center gap-1 font-semibold text-slate-600 transition hover:text-brand-600" title="跳过缓存重新生成">${MM_ICON_REFRESH}重新生成</button>
         <button type="button" class="mm-copy inline-flex items-center gap-1 font-semibold text-slate-600 transition hover:text-brand-600" title="复制 Markdown 大纲">${ICON.copy}复制</button>
         <div class="relative">
@@ -833,10 +850,13 @@ const renderComments = (panel, data) => {
   }).join('');
   panel.innerHTML = `
     <div class="fade-in flex h-full flex-col">
-    <div class="flex flex-wrap items-center gap-2">
-      <span class="text-sm text-slate-600">共 <b class="font-semibold text-slate-900">${list.length}</b> 条高赞评论</span>
-      ${srcLabel ? `<span class="rounded-md bg-brand-50 px-2 py-0.5 text-xs font-semibold text-brand-600">${escapeHtml(srcLabel)}</span>` : ''}
-      ${data.cached ? '<span class="rounded-full bg-emerald-50 px-2 py-0.5 text-xs font-semibold text-emerald-600">已缓存</span>' : ''}
+    <div class="flex flex-wrap items-center justify-between gap-2">
+      <div class="flex flex-wrap items-center gap-2">
+        <span class="text-sm text-slate-600">共 <b class="font-semibold text-slate-900">${list.length}</b> 条高赞评论</span>
+        ${srcLabel ? `<span class="rounded-md bg-brand-50 px-2 py-0.5 text-xs font-semibold text-brand-600">${escapeHtml(srcLabel)}</span>` : ''}
+        ${data.cached ? '<span class="rounded-full bg-emerald-50 px-2 py-0.5 text-xs font-semibold text-emerald-600">已缓存</span>' : ''}
+      </div>
+      ${panelShareBtnHtml()}
     </div>
     <div class="mt-3 min-h-0 flex-1 overflow-y-auto pr-2">${rows}</div>
     </div>`;
@@ -863,7 +883,10 @@ const renderQA = (panel, url) => {
         <h4 class="inline-flex items-center gap-2 text-base font-bold text-slate-900">
           <span class="text-brand-500">${TAB_ICONS.qa}</span> AI 问答
         </h4>
-        <span class="text-xs text-slate-400">仅依据该视频字幕作答</span>
+        <div class="flex items-center gap-3">
+          <span class="text-xs text-slate-400">仅依据该视频字幕作答</span>
+          ${panelShareBtnHtml()}
+        </div>
       </div>
       <div class="qa-log mt-3 min-h-0 flex-1 space-y-3 overflow-y-auto pr-1"></div>
       <div class="qa-suggest mt-3 flex flex-wrap gap-2"></div>
@@ -1049,6 +1072,14 @@ const activateTab = (card, tab) => {
   card.querySelectorAll('.ai-tabpanel').forEach((p) => {
     p.classList.toggle('hidden', p.dataset.panel !== tab);
   });
+  // Tab 右上角分享按钮跟随当前载体（单独分享每个 Tab）
+  const tsBtn = card.querySelector('.tab-share-btn');
+  if (tsBtn) {
+    tsBtn.dataset.tab = tab;
+    tsBtn.title = `分享当前 Tab：${TAB_LABELS[tab]}`;
+    const sp = tsBtn.querySelector('span');
+    if (sp) sp.textContent = `分享 · ${TAB_LABELS[tab]}`;
+  }
 };
 
 const switchTab = async (card, url, tab) => {
@@ -1112,6 +1143,102 @@ const bindSplitter = (cardEl) => {
   split.addEventListener('pointercancel', stop);
 };
 
+/* ---------- 分享：左栏按钮分享原视频，Tab 右上角/面板内按钮分享当前载体 ----------
+ * 快照取「用户屏幕上正在看的内容」（会话缓存），保证分享物与所见一致；服务端再按上限消毒。
+ * 弹窗内可全选/多选 Tab（每个载体独立短链），未生成的载体在弹窗里置灰不可选。
+ */
+const snapshotFor = (cardEl, url, kind) => {
+  const sum = sumCache.get(url);
+  const tx = txCache.get(url);
+  const mm = mindmapCache.get(url);
+  const cm = commentsCache.get(url);
+  const qa = qaCache.get(url);
+
+  if (kind === 'video' || kind === 'summary') {
+    // video 恒可分享（标题/封面由服务端 video_infos 兜底）；summary 需已生成
+    if (kind === 'summary' && !sum) return null;
+    const s = (sum || {}).summary || {};
+    return {
+      snapshot: {
+        excerpt: s.one_line || String(s.summary || '').slice(0, 300),
+        bullets: (s.key_points || []).slice(0, 3),
+        model_label: s.model || '',
+      },
+      refId: '',
+    };
+  }
+  if (kind === 'transcript') {
+    if (!tx) return null;
+    return { snapshot: { excerpt: String(tx.text || '').slice(0, 300), segment_count: (tx.segments || []).length }, refId: '' };
+  }
+  if (kind === 'mindmap') {
+    if (!mm) return null;
+    const m = mm.mindmap || {};
+    return {
+      snapshot: {
+        excerpt: '',
+        top_nodes: (m.children || []).slice(0, 8).map((c) => c.title || ''),
+        model_label: m.model || '',
+      },
+      refId: '',
+    };
+  }
+  if (kind === 'comments') {
+    if (!cm) return null;
+    return {
+      snapshot: {
+        excerpt: `共 ${(cm.comments || []).length} 条高赞评论`,
+        comments: (cm.comments || []).slice(0, 3).map((c) => ({ author: c.author, text: c.text, likes: c.likes })),
+      },
+      refId: '',
+    };
+  }
+  if (kind === 'qa') {
+    const msgs = (qa || {}).messages || [];
+    const pairs = [];
+    for (let i = 0; i + 1 < msgs.length && pairs.length < 3; i += 1) {
+      if (msgs[i].role === 'user' && msgs[i + 1].role === 'assistant' && !msgs[i + 1].error) {
+        pairs.push({ q: msgs[i].content, a: msgs[i + 1].content });
+      }
+    }
+    if (!pairs.length) return null;
+    return { snapshot: { excerpt: pairs[0].q, qa: pairs }, refId: qa.sessionId || '' };
+  }
+  if (kind === 'notes') {
+    const ns = getNotesShareSnapshot(cardEl.dataset.contentKey || '');
+    if (!ns) return null;
+    return { snapshot: { excerpt: ns.excerpt, mark_count: ns.marks || 0 }, refId: ns.note_id || '' };
+  }
+  return null;
+};
+
+/* 组装弹窗可选载体：原视频 + 六个 Tab；available 取决于对应缓存是否已生成 */
+const buildShareTargets = (cardEl, url) => {
+  const kinds = ['video', ...TAB_ORDER.filter((t) => t !== 'notes' || cardEl.dataset.compact !== '1')];
+  const targets = [];
+  kinds.forEach((kind) => {
+    const built = snapshotFor(cardEl, url, kind);
+    targets.push({
+      kind,
+      label: kind === 'video' ? '原视频' : TAB_LABELS[kind],
+      available: !!built,
+      snapshot: built ? built.snapshot : {},
+      refId: built ? built.refId : '',
+    });
+  });
+  return targets;
+};
+
+const openShareFor = (cardEl, url, activeKind) => {
+  openShare({
+    contentKey: cardEl.dataset.contentKey || '',
+    url,
+    title: cardEl.dataset.title || '',
+    activeKind,
+    targets: buildShareTargets(cardEl, url),
+  });
+};
+
 /* ---------- 绑定卡片事件 ---------- */
 const bindCard = (cardEl, url) => {
   const dlBtn = cardEl.querySelector('.dl-btn');
@@ -1168,13 +1295,25 @@ const bindCard = (cardEl, url) => {
     }));
   }
 
+  const shareBtn = cardEl.querySelector('.share-btn');
+  if (shareBtn) shareBtn.addEventListener('click', () => openShareFor(cardEl, url, 'video'));
+  const tabShareBtn = cardEl.querySelector('.tab-share-btn');
+  if (tabShareBtn) tabShareBtn.addEventListener('click', () => openShareFor(cardEl, url, tabShareBtn.dataset.tab || 'summary'));
+  // 面板右上角分享：卡片级事件委托，对面板 innerHTML 重渲染免疫（图三样式入口）
+  cardEl.addEventListener('click', (e) => {
+    const pb = e.target.closest('.panel-share-btn');
+    if (!pb || !cardEl.contains(pb)) return;
+    const panel = pb.closest('.ai-tabpanel');
+    openShareFor(cardEl, url, (panel && panel.dataset.panel) || 'summary');
+  });
+
   cardEl.querySelectorAll('[role="tab"]').forEach((tabBtn) => {
     tabBtn.addEventListener('click', () => switchTab(cardEl, url, tabBtn.dataset.tab));
   });
 };
 
 /* ---------- 单条渲染 ---------- */
-const renderSingle = async (container, url) => {
+const renderSingle = async (container, url, wantTab = '') => {
   container.innerHTML =
     '<div class="rounded-3xl border border-slate-200 bg-white p-8 text-center text-slate-500 shadow-sm"><span class="inline-flex items-center gap-2"><span class="spinner"></span> 正在解析视频信息…</span></div>';
   try {
@@ -1185,6 +1324,10 @@ const renderSingle = async (container, url) => {
     card.dataset.title = info.title || '';
     bindCard(card, url);
     switchTab(card, url, 'comments');   // 默认展示高赞评论（自动抓取，零 LLM 成本）
+    // 分享落地页 CTA 深链：?tab= 直达对应 Tab（compact 卡无该面板时忽略）
+    if (wantTab && wantTab !== 'comments' && card.querySelector(`.ai-tabpanel[data-panel="${wantTab}"]`)) {
+      switchTab(card, url, wantTab);
+    }
   } catch (e) {
     container.innerHTML =
       `<div class="rounded-3xl border border-rose-300 bg-rose-50 p-6 text-sm text-rose-600">${escapeHtml(e.message)}</div>`;
@@ -1247,7 +1390,7 @@ export default {
     } else {
       // 单条双栏：桌面端主区不整页滚动，改由左右栏各自内部滚动（按钮/Tab 常驻）
       container.classList.add('lg:min-h-0', 'lg:overflow-hidden');
-      renderSingle(container, urls[0]);
+      renderSingle(container, urls[0], (ctx.query.get('tab') || '').trim());
     }
   },
 };

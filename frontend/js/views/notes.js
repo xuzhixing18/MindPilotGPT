@@ -13,7 +13,7 @@
  *   二选一（用我的版本覆盖 / 改用服务端版本）；beforeunload 走 fetch keepalive 兜底；
  * - 未登录渲染登录引导卡（私有资源永远要求登录）。
  */
-import { $, state, escapeHtml, fmtTs, relativeTime, bus, me, notesCache, copyText } from '../core.js';
+import { $, state, escapeHtml, fmtTs, relativeTime, bus, me, notesCache, copyText, ICON } from '../core.js';
 import { openAuth } from '../auth-ui.js';
 
 const SAVE_DEBOUNCE = 800;   // 自动保存防抖（ms）
@@ -80,6 +80,16 @@ const renderMarkdown = (body) => {
   return out.join('');
 };
 
+/* ---------- 分享快照桥（供 result.js 的 notes Tab 分享按钮取「所见即所享」数据） ----------
+ * 面板状态 st 是 renderNotesPanel 的闭包私有量，result.js 无法直接读；这里用模块级
+ * holder 把当前面板的取值器暴露出去，contentKey 不匹配（面板未挂载/换了视频）返回 null。 */
+let notesShareState = null;
+
+export const getNotesShareSnapshot = (contentKey) => {
+  if (!notesShareState || notesShareState.contentKey !== contentKey) return null;
+  return notesShareState.get();
+};
+
 /* ---------- 面板组件 ---------- */
 export const renderNotesPanel = (panel, ctx) => {
   const { contentKey, url, title, getCtrl, onPlayer, mountPlayer } = ctx;
@@ -99,6 +109,7 @@ export const renderNotesPanel = (panel, ctx) => {
     panel.querySelector('.notes-login').addEventListener('click', () => openAuth('login'));
   };
 
+  notesShareState = null;   // 未登录没有可分享的笔记内容
   if (!state.currentUser) { renderLoginPrompt(); return; }
 
   /* 状态：列表 + 当前编辑器（body/title 为工作副本，base 为并发基线） */
@@ -112,6 +123,24 @@ export const renderNotesPanel = (panel, ctx) => {
   };
   const byId = (id) => st.notes.find((n) => n.id === id);
 
+  /* 分享快照：优先编辑中的工作副本（未保存内容也能「所见即所享」），
+   * 回退当前选中笔记，再回退第一篇；正文去掉时间戳标记语法只留可读时间。 */
+  notesShareState = {
+    contentKey,
+    get: () => {
+      const target = (st.edit && byId(st.edit.id)) || byId(st.activeId) || st.notes[0];
+      if (!target) return null;
+      const body = (st.edit && st.edit.id === target.id ? st.edit.body : target.body) || '';
+      if (!body.trim()) return null;
+      return {
+        note_id: target.id,
+        title: noteTitle({ ...target, body }),
+        excerpt: String(body).replace(TS_MARK_MD, '$1').slice(0, 300),
+        marks: (target.marks || []).length,
+      };
+    },
+  };
+
   /* ---------- 面板骨架 ---------- */
   panel.innerHTML = `
     <div class="fade-in flex h-full min-h-0 flex-col">
@@ -121,9 +150,12 @@ export const renderNotesPanel = (panel, ctx) => {
           随手笔记
           <span class="notes-count rounded-full bg-slate-100 px-2 py-0.5 text-xs font-semibold text-slate-500"></span>
         </h4>
-        <button type="button" class="notes-new inline-flex items-center gap-1 rounded-xl bg-cyan-500 px-3 py-1.5 text-sm font-bold text-white shadow-sm transition hover:bg-cyan-600 active:scale-95">
-          <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>新建笔记
-        </button>
+        <div class="flex shrink-0 items-center gap-3">
+          <button type="button" class="panel-share-btn inline-flex shrink-0 items-center gap-1 text-sm font-bold text-brand-600 transition hover:text-brand-700" title="分享本 Tab，弹窗内可全选/多选 Tab">${ICON.share}分享</button>
+          <button type="button" class="notes-new inline-flex items-center gap-1 rounded-xl bg-cyan-500 px-3 py-1.5 text-sm font-bold text-white shadow-sm transition hover:bg-cyan-600 active:scale-95">
+            <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>新建笔记
+          </button>
+        </div>
       </div>
       <div class="notes-toast mt-1 text-xs text-amber-600"></div>
       <div class="notes-list mt-2 max-h-44 shrink-0 space-y-2 overflow-y-auto pr-1"></div>

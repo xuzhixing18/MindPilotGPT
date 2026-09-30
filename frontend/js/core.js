@@ -210,6 +210,13 @@ export const me = {
   deleteNote: (id) => meFetch(`/api/me/notes/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   deleteNoteImage: (id) => meFetch(`/api/me/notes/images/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   captureFrame: (url, t) => meFetch('/api/me/notes/frames', { method: 'POST', body: { url, t } }),
+  // 分享（/api/me/shares）：创建幂等（同载体复用旧码，200/201 均返回 share）
+  shareCreate: (body) => meFetch('/api/me/shares', { method: 'POST', body }),
+  shares: (params = {}) => {
+    const qs = new URLSearchParams(Object.entries(params).filter(([, v]) => v !== '' && v != null));
+    return getJson(`/api/me/shares?${qs.toString()}`);
+  },
+  revokeShare: (code) => meFetch(`/api/me/shares/${encodeURIComponent(code)}`, { method: 'DELETE' }),
 };
 
 // 私有资源写操作：成功返回 data，失败抛带 status 的 Error（401 已触发登录框）；
@@ -351,9 +358,25 @@ export const ICON = {
   check: '<svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 6L9 17l-5-5"/></svg>',
   thumb: '<svg viewBox="0 0 24 24" class="h-3.5 w-3.5" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 9V5a3 3 0 00-6 0v4H5a2 2 0 00-2 2l1 8a2 2 0 002 2h11a2 2 0 002-1.6l1.2-7A2 2 0 0018.2 9H14z"/><path d="M8 9v12"/></svg>',
   play: '<svg viewBox="0 0 24 24" class="h-5 w-5" fill="currentColor" stroke="none"><path d="M8 5.5v13l11-6.5-11-6.5z"/></svg>',
+  share: '<svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="M8.6 13.5l6.8 4M15.4 6.5l-6.8 4"/></svg>',
 };
 
 export const AI_CONFIG_HINT = '请复制 .env.example 为 .env 并填入 API Key 后重启服务。';
+
+/* ---------- 轻提示（底部浮层，自动消隐）：分享/导出等动作的即时反馈 ---------- */
+export const toast = (msg) => {
+  if (!msg) return;
+  let el = document.querySelector('.mp-toast');
+  if (!el) {
+    el = document.createElement('div');
+    el.className = 'mp-toast fixed bottom-6 left-1/2 z-[70] -translate-x-1/2 rounded-xl bg-slate-900/90 px-4 py-2 text-sm text-white shadow-card';
+    document.body.appendChild(el);
+  }
+  el.textContent = msg;
+  el.style.display = 'block';
+  clearTimeout(el._t);
+  el._t = setTimeout(() => { el.style.display = 'none'; }, 2600);
+};
 
 /* ---------- 历史 kinds 徽标（侧边栏 / 历史列表 / 合集详情共用） ----------
  * kinds 取值与后端 library.service.KINDS 一致：transcribe/summary/mindmap/comments/qa/note。

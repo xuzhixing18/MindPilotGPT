@@ -41,7 +41,7 @@ _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from backend import ai, auth, comments, downloader, library, notes, storage, transcribe
+from backend import ai, auth, comments, downloader, library, notes, share, storage, transcribe
 from backend.downloader.common import DOWNLOAD_DIR
 
 # 前端静态目录：项目根目录下的 frontend/
@@ -74,6 +74,11 @@ app.include_router(library.router)
 # 同样永远要求登录；抽帧端点经 set_stream_cache_lookup 复用进程内流播缓存（只查不下载）。
 app.add_exception_handler(notes.NotesError, notes.notes_error_handler)
 app.include_router(notes.router)
+
+# 分享包（短链落地页/海报数据）：私有 /api/me/shares/* 永远要求登录；
+# 公开 /s/{code}、/api/share/* 不挂门禁（分享本体即公开物），限流在包内滑动窗口。
+app.add_exception_handler(share.ShareError, share.share_error_handler)
+app.include_router(share.router)
 
 # 业务端点统一门禁（/api/health 与 /api/auth/* 不在此列，保持开放以供前端探测与登录）：
 #   AUTH_ENABLED=false（默认）              → 完全放行，行为与改造前一致；

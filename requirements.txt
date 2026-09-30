@@ -17,3 +17,5 @@ psycopg[binary]>=3.1
 argon2-cffi>=23.1.0
 # 头像等文件上传：FastAPI 的 File/UploadFile（multipart 表单）依赖此包
 python-multipart>=0.0.20
+# 分享海报二维码：纯 Python QR 编码（SvgPathImage 工厂无需 Pillow），前端 canvas 消费 SVG
+qrcode>=7.4
