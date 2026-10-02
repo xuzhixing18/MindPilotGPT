@@ -10,7 +10,7 @@ import {
   txCache, sumCache, mindmapCache, commentsCache, qaCache,
   triggerDownload, buildSubtitleText, downloadText, downloadBlob, copyText, buildMindmapMarkdown,
   downloadSvg, downloadSvgPng, toast,
-  ICON, AI_CONFIG_HINT,
+  ICON, AI_CONFIG_HINT, panelActionsHtml,
 } from '../core.js';
 import { addToCollection } from '../coll-picker.js';
 import { createPlayer, detectPlayer, mountNative } from '../player.js';
@@ -213,10 +213,82 @@ const renderCard = (info, url, opts = {}) => {
     </div>`;
 };
 
-/* 面板右上角分享入口（图三样式）：事件统一走 bindCard 的卡片级委托，
- * 面板 innerHTML 重渲染后无需重新接线；notes.js 内同构内联（避免循环依赖） */
-const panelShareBtnHtml = () =>
-  `<button type="button" class="panel-share-btn inline-flex shrink-0 items-center gap-1 text-sm font-bold text-brand-600 transition hover:text-brand-700" title="分享本 Tab，弹窗内可全选/多选 Tab">${ICON.share}分享</button>`;
+/* ---------- 面板统一动作条的内容源与动作实现（配合 core.js panelActionsHtml） ----------
+ * 文本一律取会话缓存（所见即所得，与屏幕渲染同源）；事件统一走 bindCard 卡片级
+ * 委托，面板 innerHTML 重渲染免疫。空串 = 该 Tab 尚未生成。 */
+const summaryToText = (data, md) => {
+  const s = (data || {}).summary || {};
+  const head = (t) => (md ? `## ${t}` : `—— ${t} ——`);
+  const lines = [];
+  if (data.title) lines.push(md ? `# ${data.title}` : data.title);
+  if (s.one_line) lines.push(s.one_line);
+  if (s.summary) lines.push(s.summary);
+  if ((s.key_points || []).length) lines.push(head('关键要点') + '\n' + s.key_points.map((p) => (md ? `- ${p}` : `• ${p}`)).join('\n'));
+  if ((s.chapters || []).length) lines.push(head('章节速览') + '\n' + s.chapters.map((c, i) => (md ? `### ${i + 1}. ${c.title || ''}\n${c.summary || ''}` : `${i + 1}. ${c.title || ''}${c.summary ? '：' + c.summary : ''}`)).join('\n'));
+  if ((s.keywords || []).length) lines.push(head('关键词') + '\n' + s.keywords.join('、'));
+  if (s.model) lines.push(md ? `> 由 ${s.model} 生成` : `（由 ${s.model} 生成）`);
+  return lines.join('\n\n');
+};
+const commentsToText = (data) => [
+  `《${(data || {}).title || '视频'}》高赞评论（${(data.comments || []).length} 条）`,
+  ...(data.comments || []).map((c, i) => `${i + 1}. ${c.author || '匿名'}（${fmtCount(c.likes)} 赞）：\n${c.text}`),
+].join('\n\n');
+const qaToText = (conv, md) => (conv.messages || [])
+  .filter((m) => !m.error)
+  .map((m) => (m.role === 'user' ? (md ? `**问：${m.content}**` : `问：${m.content}`) : `答：${m.content}`))
+  .join('\n\n');
+
+/* kind → 可复制/可下载文本（fmt 区分 md/txt/srt；mindmap 恒为 Markdown 大纲） */
+const panelText = (kind, url, card, fmt) => {
+  if (kind === 'summary') { const d = sumCache.get(url); return d ? summaryToText(d, fmt === 'md') : ''; }
+  if (kind === 'transcript') { const d = txCache.get(url); return d ? buildSubtitleText(d.segments || [], fmt === 'srt' ? 'srt' : 'txt') : ''; }
+  if (kind === 'mindmap') { const d = mindmapCache.get(url); return d && d.mindmap ? buildMindmapMarkdown(d.mindmap) : ''; }
+  if (kind === 'comments') { const d = commentsCache.get(url); return d ? commentsToText(d) : ''; }
+  if (kind === 'qa') { const c = qaCache.get(url); return c && (c.messages || []).length ? qaToText(c, fmt === 'md') : ''; }
+  if (kind === 'notes') { const ns = getNotesShareSnapshot(card.dataset.contentKey || ''); return ns && ns.full ? ns.full : ''; }
+  return '';
+};
+
+const PANEL_DL_NAMES = { summary: 'AI总结', transcript: '字幕', mindmap: '思维导图', comments: '高赞评论', qa: 'AI问答', notes: '笔记' };
+/* kind+fmt → 下载；抛错由委托层 toast 展示（xmind/png/svg 走既有序列化/后端打包链路） */
+const panelDownload = async (kind, fmt, url, card) => {
+  const base = ((card.dataset.title || 'mindpilot').replace(/[\\/:*?"<>|]/g, '_').slice(0, 60)) || 'mindpilot';
+  if (kind === 'mindmap' && fmt === 'xmind') {
+    const res = await fetch('/api/mindmap/xmind', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url }),
+    });
+    if (!res.ok) {
+      const d = await res.json().catch(() => ({}));
+      throw new Error(d.detail || `导出失败 (HTTP ${res.status})`);
+    }
+    downloadBlob(`${base}.xmind`, await res.blob());
+    return;
+  }
+  if (kind === 'mindmap' && (fmt === 'png' || fmt === 'svg')) {
+    const d = mindmapCache.get(url);
+    if (!d || !d.mindmap) throw new Error('思维导图尚未生成');
+    const doc = mmExportDoc(d.mindmap);
+    if (fmt === 'svg') downloadSvg(doc.markup, base);
+    else await downloadSvgPng(doc.markup, doc.w, doc.h, base);
+    return;
+  }
+  if (kind === 'notes') {
+    const ns = getNotesShareSnapshot(card.dataset.contentKey || '');
+    if (!ns || !ns.full) throw new Error('还没有可下载的笔记');
+    downloadText(`${(ns.title || '笔记').replace(/[\\/:*?"<>|]/g, '_').slice(0, 60)}.md`, ns.full, 'text/markdown');
+    return;
+  }
+  const text = panelText(kind, url, card, fmt);
+  if (!text) throw new Error('本 Tab 内容尚未生成，无法下载');
+  const ext = fmt || 'txt';
+  const mime = ext === 'md' ? 'text/markdown' : ext === 'srt' ? 'application/x-subrip' : 'text/plain';
+  downloadText(`${base}-${PANEL_DL_NAMES[kind] || '内容'}.${ext}`, text, mime);
+};
+
+/* 下载菜单外部点击收起：模块级注册一次（dl-toggle/opt 自行 stopPropagation 防误关） */
+document.addEventListener('click', () => {
+  document.querySelectorAll('.panel-dl-menu:not(.hidden)').forEach((m) => m.classList.add('hidden'));
+});
 
 /* ---------- AI 面板：加载 / 错误 ---------- */
 const panelLoading = (panel, textOrStages) => {
@@ -234,8 +306,17 @@ const panelLoading = (panel, textOrStages) => {
   return () => clearInterval(id);
 };
 
+/* 错误文本归一化：后端 422 的 detail 是对象数组（[{loc,msg,type}]），直接交给
+ * escapeHtml 会渲染成 [object Object]；这里递归提取可读信息，兜底才用 fallback。 */
+const errText = (v, fallback = '未知错误') => {
+  if (typeof v === 'string') return v || fallback;
+  if (Array.isArray(v)) return v.map((x) => errText(x, '')).filter(Boolean).join('；') || fallback;
+  if (v && typeof v === 'object') return errText(v.detail || v.msg || v.message, fallback);
+  return v == null ? fallback : String(v);
+};
+
 const panelError = (panel, msg) => {
-  panel.innerHTML = `<div class="rounded-xl border border-rose-200 bg-rose-50 p-4 text-sm leading-relaxed text-rose-600">${escapeHtml(msg)}</div>`;
+  panel.innerHTML = `<div class="rounded-xl border border-rose-200 bg-rose-50 p-4 text-sm leading-relaxed text-rose-600">${escapeHtml(errText(msg))}</div>`;
 };
 
 const renderSummary = (panel, data) => {
@@ -263,7 +344,7 @@ const renderSummary = (panel, data) => {
       </h4>
       <div class="flex items-center gap-3">
         ${s.model ? `<span class="text-xs text-slate-400">${escapeHtml(s.model)}</span>` : ''}
-        ${panelShareBtnHtml()}
+        ${panelActionsHtml({ dlMenu: [['md', 'Markdown 文档'], ['txt', '纯文本']], dlLabel: '下载总结' })}
       </div>
     </div>
     ${s.one_line ? `<p class="mt-3 text-sm font-semibold text-brand-700">${escapeHtml(s.one_line)}</p>` : ''}
@@ -306,17 +387,11 @@ const renderTranscript = async (panel, data, url) => {
         ${data.cached ? '<span class="rounded-full bg-emerald-50 px-2 py-0.5 text-xs font-semibold text-emerald-600">已缓存</span>' : ''}
         ${segs.length && !hasTimeline ? '<span class="rounded-full bg-amber-50 px-2 py-0.5 text-xs font-semibold text-amber-600" title="该视频无字幕，文本由语音识别（ASR）生成，不含时间轴：时间戳跳转与滚动联动不可用">ASR 转写·无时间轴</span>' : ''}
       </div>
-      <div class="flex items-center gap-4 text-sm">
-        ${panelShareBtnHtml()}
-        <button type="button" class="sub-copy inline-flex items-center gap-1 font-semibold text-brand-600 transition hover:text-brand-700">${ICON.copy}复制</button>
-        <div class="relative">
-          <button type="button" class="sub-dl inline-flex items-center gap-1 font-semibold text-brand-600 transition hover:text-brand-700">${ICON.dl}下载字幕${ICON.caret}</button>
-          <div class="sub-dl-menu absolute right-0 z-10 mt-1 hidden w-28 overflow-hidden rounded-xl border border-slate-200 bg-white py-1 shadow-card">
-            <button type="button" data-kind="srt" class="sub-dl-opt block w-full px-3 py-1.5 text-left text-sm text-slate-600 transition hover:bg-brand-50 hover:text-brand-600">SRT 字幕</button>
-            <button type="button" data-kind="txt" class="sub-dl-opt block w-full px-3 py-1.5 text-left text-sm text-slate-600 transition hover:bg-brand-50 hover:text-brand-600">TXT 纯文本</button>
-          </div>
-        </div>
-        <button type="button" class="sub-expand font-semibold text-brand-600 transition hover:text-brand-700">展开全部</button>
+      <div class="flex items-center gap-3 text-sm">
+        ${panelActionsHtml({
+          dlMenu: [['srt', 'SRT 字幕'], ['txt', 'TXT 纯文本']], dlLabel: '下载字幕',
+          extra: '<button type="button" class="sub-expand font-semibold text-brand-600 transition hover:text-brand-700">展开全部</button>',
+        })}
       </div>
     </div>
     <div class="mt-2 flex flex-wrap items-center gap-x-4 gap-y-2">
@@ -469,34 +544,7 @@ const renderTranscript = async (panel, data, url) => {
     setActiveRow(row ? Number(row.dataset.gi) : -1, false);
   });
 
-  /* 复制 / 下载 / 展开（沿用既有行为） */
-  const menu = panel.querySelector('.sub-dl-menu');
-  panel.querySelector('.sub-dl').addEventListener('click', (e) => { e.stopPropagation(); menu.classList.toggle('hidden'); });
-  panel.querySelectorAll('.sub-dl-opt').forEach((opt) => opt.addEventListener('click', () => {
-    const kind = opt.dataset.kind;
-    downloadText(`subtitles.${kind}`, buildSubtitleText(segs, kind), kind === 'srt' ? 'application/x-subrip' : 'text/plain');
-    menu.classList.add('hidden');
-  }));
-  const copyBtn = panel.querySelector('.sub-copy');
-  copyBtn.addEventListener('click', async () => {
-    const text = buildSubtitleText(segs, 'txt');
-    const done = () => {
-      copyBtn.innerHTML = `${ICON.check}已复制`;
-      setTimeout(() => { copyBtn.innerHTML = `${ICON.copy}复制`; }, 1500);
-    };
-    try {
-      await navigator.clipboard.writeText(text);
-      done();
-    } catch (e) {
-      const ta = document.createElement('textarea');
-      ta.value = text;
-      document.body.appendChild(ta);
-      ta.select();
-      document.execCommand('copy');
-      ta.remove();
-      done();
-    }
-  });
+  /* 展开（复制/下载已统一走动作条委托） */
   const expandBtn = panel.querySelector('.sub-expand');
   expandBtn.addEventListener('click', () => {
     const expanded = listEl.style.maxHeight === 'none';
@@ -649,7 +697,6 @@ const mmExportDoc = (mm) => {
   };
 };
 
-const MM_ICON_REFRESH = '<svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 11-2.6-6.4M21 3v6h-6"/></svg>';
 const MM_ICON_FIT = '<svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>';
 
 const renderMindmap = (panel, data, url) => {
@@ -683,21 +730,9 @@ const renderMindmap = (panel, data, url) => {
         思维导图
         ${(data.cached || mm.cached) ? '<span class="rounded-full bg-emerald-50 px-2 py-0.5 text-xs font-semibold text-emerald-600">已缓存</span>' : ''}
       </h4>
-      <div class="flex items-center gap-2 text-sm">
-        <span class="mm-err text-xs text-rose-500"></span>
+      <div class="flex items-center gap-3 text-sm">
         ${mm.model ? `<span class="text-xs text-slate-400">${escapeHtml(mm.model)}</span>` : ''}
-        ${panelShareBtnHtml()}
-        <button type="button" class="mm-refresh inline-flex items-center gap-1 font-semibold text-slate-600 transition hover:text-brand-600" title="跳过缓存重新生成">${MM_ICON_REFRESH}重新生成</button>
-        <button type="button" class="mm-copy inline-flex items-center gap-1 font-semibold text-slate-600 transition hover:text-brand-600" title="复制 Markdown 大纲">${ICON.copy}复制</button>
-        <div class="relative">
-          <button type="button" class="mm-dl inline-flex items-center gap-1 font-semibold text-brand-600 transition hover:text-brand-700">${ICON.dl}下载导图${ICON.caret}</button>
-          <div class="mm-dl-menu absolute right-0 z-10 mt-1 hidden w-40 overflow-hidden rounded-xl border border-slate-200 bg-white py-1 shadow-card">
-            <button type="button" data-kind="png" class="mm-dl-opt block w-full px-3 py-1.5 text-left text-sm text-slate-600 transition hover:bg-brand-50 hover:text-brand-600">PNG 图片</button>
-            <button type="button" data-kind="svg" class="mm-dl-opt block w-full px-3 py-1.5 text-left text-sm text-slate-600 transition hover:bg-brand-50 hover:text-brand-600">SVG 矢量图</button>
-            <button type="button" data-kind="md" class="mm-dl-opt block w-full px-3 py-1.5 text-left text-sm text-slate-600 transition hover:bg-brand-50 hover:text-brand-600">Markdown 大纲</button>
-            <button type="button" data-kind="xmind" class="mm-dl-opt block w-full px-3 py-1.5 text-left text-sm text-slate-600 transition hover:bg-brand-50 hover:text-brand-600">XMind 文件（.xmind）</button>
-          </div>
-        </div>
+        ${panelActionsHtml({ dlMenu: [['png', 'PNG 图片'], ['svg', 'SVG 矢量图'], ['md', 'Markdown 大纲'], ['xmind', 'XMind 文件（.xmind）']], dlLabel: '下载导图' })}
       </div>
     </div>
     <div class="mm-canvas relative mt-3 min-h-[22rem] flex-1 overflow-hidden rounded-2xl border border-slate-200 bg-slate-50/70">
@@ -715,7 +750,6 @@ const renderMindmap = (panel, data, url) => {
     </div>`;
 
   const base = (mm.title || 'mindmap').replace(/[\\/:*?"<>|]/g, '_');
-  const errEl = panel.querySelector('.mm-err');
   const svg = panel.querySelector('.mm-svg');
   const g = svg.querySelector('.mm-g');
   let view = { x: 24, y: 24, k: 1 };
@@ -783,50 +817,8 @@ const renderMindmap = (panel, data, url) => {
   panel.querySelector('.mm-zin').addEventListener('click', () => zoomBy(1.25));
   panel.querySelector('.mm-zout').addEventListener('click', () => zoomBy(0.8));
   panel.querySelector('.mm-fit').addEventListener('click', fit);
-
-  /* 工具栏：重新生成 / 复制 / 下载菜单（PNG/SVG/MD 本地序列化，.xmind 走后端打包） */
-  const refreshBtn = panel.querySelector('.mm-refresh');
-  refreshBtn.addEventListener('click', async () => {
-    const orig = refreshBtn.innerHTML;
-    refreshBtn.disabled = true;
-    refreshBtn.innerHTML = '<span class="inline-flex items-center gap-1"><span class="spinner"></span>生成中…</span>';
-    try { await loadMindmap(url, panel, true); } finally { refreshBtn.disabled = false; refreshBtn.innerHTML = orig; }
-  });
-  panel.querySelector('.mm-copy').addEventListener('click', async () => {
-    const ok = await copyText(buildMindmapMarkdown(mm));
-    errEl.textContent = ok ? '' : '复制失败，请手动选择文本';
-  });
-  const mmMenu = panel.querySelector('.mm-dl-menu');
-  panel.querySelector('.mm-dl').addEventListener('click', (e) => { e.stopPropagation(); mmMenu.classList.toggle('hidden'); });
-  panel.querySelectorAll('.mm-dl-opt').forEach((opt) => opt.addEventListener('click', async () => {
-    mmMenu.classList.add('hidden');
-    const kind = opt.dataset.kind;
-    if (kind === 'md') { downloadText(`${base}.md`, buildMindmapMarkdown(mm), 'text/markdown'); return; }
-    if (kind === 'png' || kind === 'svg') {
-      const doc = mmExportDoc(mm);
-      if (kind === 'svg') downloadSvg(doc.markup, base);
-      else await downloadSvgPng(doc.markup, doc.w, doc.h, base);
-      return;
-    }
-    // .xmind：后端 zipfile 打包（含章节时间线 labels）
-    errEl.textContent = '';
-    opt.disabled = true;
-    try {
-      const res = await fetch('/api/mindmap/xmind', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url }),
-      });
-      if (!res.ok) {
-        const d = await res.json().catch(() => ({}));
-        errEl.textContent = d.detail || `导出失败 (HTTP ${res.status})`;
-        return;
-      }
-      downloadBlob(`${base}.xmind`, await res.blob());
-    } catch (e) {
-      errEl.textContent = e.message || '网络错误，导出失败';
-    } finally { opt.disabled = false; }
-  }));
+  /* 重新生成/复制/下载已统一走动作条卡片级委托（bindCard）；base 保留供未来导出命名 */
+  void base;
 };
 
 /* ---------- 高赞评论渲染（服务端已按赞排序取 TopN） ---------- */
@@ -856,7 +848,7 @@ const renderComments = (panel, data) => {
         ${srcLabel ? `<span class="rounded-md bg-brand-50 px-2 py-0.5 text-xs font-semibold text-brand-600">${escapeHtml(srcLabel)}</span>` : ''}
         ${data.cached ? '<span class="rounded-full bg-emerald-50 px-2 py-0.5 text-xs font-semibold text-emerald-600">已缓存</span>' : ''}
       </div>
-      ${panelShareBtnHtml()}
+      <div class="flex items-center gap-3">${panelActionsHtml({ dlFmt: 'txt', dlLabel: '下载评论' })}</div>
     </div>
     <div class="mt-3 min-h-0 flex-1 overflow-y-auto pr-2">${rows}</div>
     </div>`;
@@ -885,7 +877,7 @@ const renderQA = (panel, url) => {
         </h4>
         <div class="flex items-center gap-3">
           <span class="text-xs text-slate-400">仅依据该视频字幕作答</span>
-          ${panelShareBtnHtml()}
+          ${panelActionsHtml({ regen: false, dlFmt: 'md', dlLabel: '下载记录' })}
         </div>
       </div>
       <div class="qa-log mt-3 min-h-0 flex-1 space-y-3 overflow-y-auto pr-1"></div>
@@ -929,9 +921,10 @@ const renderQA = (panel, url) => {
       if (conv.sessionId) body.session_id = conv.sessionId;   // 续接同一服务端会话
       const { res, data } = await postJson('/api/qa', body);
       if (!res.ok) {
+        // detail 可能是结构化对象（422 数组等）：统一经 errText 归一，杜绝 [object Object]
         const msg = res.status === 503
-          ? `${data.detail || 'AI 未配置'}。${AI_CONFIG_HINT}`
-          : (data.detail || `问答失败 (HTTP ${res.status})`);
+          ? `${errText(data.detail, 'AI 未配置')}。${AI_CONFIG_HINT}`
+          : errText(data.detail, `问答失败 (HTTP ${res.status})`);
         conv.messages.push({ role: 'assistant', content: msg, error: true });
       } else {
         if (data.session_id) conv.sessionId = data.session_id;   // 首轮拿到会话 id，后续复用
@@ -962,20 +955,26 @@ const renderQA = (panel, url) => {
   paintSuggest();
 };
 
-/* ---------- 各 Tab 懒加载器：命中会话缓存即渲染，否则请求并写入（返回是否成功） ---------- */
-const loadSummary = async (url, panel) => {
+/* ---------- 各 Tab 懒加载器：命中会话缓存即渲染，否则请求并写入（返回是否成功） ----------
+ * refresh=true（动作条「重新生成」）跳过缓存强制重算并覆盖；总结/导图额外传
+ * refresh_transcribe:false 只重算本层 LLM，不级联重做 ASR（后端默认跟随 refresh）。
+ * loader 统一契约 (url, panel, opts)：opts.refresh=重新生成（动作条传入），
+ * opts.card=结果卡元素（仅 notes 需要）；switchTab/prefetchTab 传 card 作第三参，
+ * 旧版把 card 当 refresh 裸透传会触发 422（[object Object] 报错回归，勿回退）。 */
+const loadSummary = async (url, panel, opts = {}) => {
+  const refresh = opts.refresh === true;
   const hit = sumCache.get(url);
-  if (hit) { renderSummary(panel, { ...hit, cached: true }); return true; }
+  if (hit && !refresh) { renderSummary(panel, { ...hit, cached: true }); return true; }
   const stop = panelLoading(panel, [
     '正在提取字幕…', '字幕较长时正在下载音频并识别语音…',
     '正在调用大模型生成结构化总结…', '快好了，正在整理要点与章节…',
   ]);
   try {
-    const { res, data } = await dedup('sum:' + url, () => postJson('/api/summarize', { url }));
+    const { res, data } = await dedup('sum:' + url + (refresh ? ':regen' : ''), () => postJson('/api/summarize', refresh ? { url, refresh: true, refresh_transcribe: false } : { url }));
     if (!res.ok) {
       panelError(panel, res.status === 503
-        ? `${data.detail || 'AI 未配置'}。${AI_CONFIG_HINT}`
-        : (data.detail || `总结失败 (HTTP ${res.status})`));
+        ? `${errText(data.detail, 'AI 未配置')}。${AI_CONFIG_HINT}`
+        : errText(data.detail, `总结失败 (HTTP ${res.status})`));
       return false;
     }
     sumCache.set(url, data);
@@ -987,15 +986,16 @@ const loadSummary = async (url, panel) => {
   } finally { stop(); }
 };
 
-const loadTranscript = async (url, panel) => {
+const loadTranscript = async (url, panel, opts = {}) => {
+  const refresh = opts.refresh === true;
   const hit = txCache.get(url);
-  if (hit) { await renderTranscript(panel, { ...hit, cached: true }, url); return true; }
+  if (hit && !refresh) { await renderTranscript(panel, { ...hit, cached: true }, url); return true; }
   const stop = panelLoading(panel, [
     '正在提取字幕…', '若该视频无字幕，正在下载音频并识别语音…', '快好了…',
   ]);
   try {
-    const { res, data } = await dedup('tx:' + url, () => postJson('/api/transcribe', { url }));
-    if (!res.ok) { panelError(panel, data.detail || `转写失败 (HTTP ${res.status})`); return false; }
+    const { res, data } = await dedup('tx:' + url + (refresh ? ':regen' : ''), () => postJson('/api/transcribe', { url, refresh }));
+    if (!res.ok) { panelError(panel, errText(data.detail, `转写失败 (HTTP ${res.status})`)); return false; }
     txCache.set(url, data);
     await renderTranscript(panel, data, url);
     return true;
@@ -1005,18 +1005,19 @@ const loadTranscript = async (url, panel) => {
   } finally { stop(); }
 };
 
-const loadMindmap = async (url, panel, refresh = false) => {
+const loadMindmap = async (url, panel, opts = {}) => {
+  const refresh = opts.refresh === true;
   const hit = mindmapCache.get(url);
   if (hit && !refresh) { renderMindmap(panel, { ...hit, cached: true }, url); return true; }
   const stop = panelLoading(panel, [
     '正在提取字幕…', '正在让大模型梳理内容层级…', '正在生成思维导图…',
   ]);
   try {
-    const { res, data } = await dedup('mm:' + url + (refresh ? ':refresh' : ''), () => postJson('/api/mindmap', { url, refresh }));
+    const { res, data } = await dedup('mm:' + url + (refresh ? ':refresh' : ''), () => postJson('/api/mindmap', refresh ? { url, refresh: true, refresh_transcribe: false } : { url }));
     if (!res.ok) {
       panelError(panel, res.status === 503
-        ? `${data.detail || 'AI 未配置'}。${AI_CONFIG_HINT}`
-        : (data.detail || `思维导图生成失败 (HTTP ${res.status})`));
+        ? `${errText(data.detail, 'AI 未配置')}。${AI_CONFIG_HINT}`
+        : errText(data.detail, `思维导图生成失败 (HTTP ${res.status})`));
       return false;
     }
     mindmapCache.set(url, data);
@@ -1028,13 +1029,14 @@ const loadMindmap = async (url, panel, refresh = false) => {
   } finally { stop(); }
 };
 
-const loadComments = async (url, panel) => {
+const loadComments = async (url, panel, opts = {}) => {
+  const refresh = opts.refresh === true;
   const hit = commentsCache.get(url);
-  if (hit) { renderComments(panel, { ...hit, cached: true }); return true; }
+  if (hit && !refresh) { renderComments(panel, { ...hit, cached: true }); return true; }
   const stop = panelLoading(panel, ['正在抓取高赞评论…', '评论较多时可能稍慢…']);
   try {
-    const { res, data } = await dedup('cm:' + url, () => postJson('/api/comments', { url }));
-    if (!res.ok) { panelError(panel, data.detail || `评论抓取失败 (HTTP ${res.status})`); return false; }
+    const { res, data } = await dedup('cm:' + url + (refresh ? ':regen' : ''), () => postJson('/api/comments', { url, refresh }));
+    if (!res.ok) { panelError(panel, errText(data.detail, `评论抓取失败 (HTTP ${res.status})`)); return false; }
     commentsCache.set(url, data);
     renderComments(panel, data);
     return true;
@@ -1048,7 +1050,8 @@ const loadQA = (url, panel) => { renderQA(panel, url); return true; };
 
 /* 随手笔记：播放器能力经 ctx 注入（playerCtrl/mountLeftPlayer 是本模块私有单例）。
  * 缓存命中由 notes.js 内部处理（notesCache 按 content_key 存，随 auth:changed 清空）。 */
-const loadNotes = (url, panel, card) => {
+const loadNotes = (url, panel, opts = {}) => {
+  const card = opts.card;
   renderNotesPanel(panel, {
     contentKey: card.dataset.contentKey || '',
     url,
@@ -1061,6 +1064,9 @@ const loadNotes = (url, panel, card) => {
 };
 
 const TAB_LOADERS = { summary: loadSummary, transcript: loadTranscript, mindmap: loadMindmap, comments: loadComments, qa: loadQA, notes: loadNotes };
+
+/* 动作条「重新生成」映射：qa/notes 无重生成概念（core.js panelActionsHtml 不渲染按钮） */
+const REGEN_LOAD = { summary: loadSummary, transcript: loadTranscript, mindmap: loadMindmap, comments: loadComments };
 
 /* ---------- Tab 切换：懒加载 + 防重复请求 ---------- */
 const activateTab = (card, tab) => {
@@ -1089,7 +1095,7 @@ const switchTab = async (card, url, tab) => {
   st.loaded.add(tab);
   const panel = card.querySelector(`.ai-tabpanel[data-panel="${tab}"]`);
   let ok = true;
-  try { ok = await TAB_LOADERS[tab](url, panel, card); }
+  try { ok = await TAB_LOADERS[tab](url, panel, { card }); }
   catch (e) { ok = false; panelError(panel, e.message || '加载失败'); }
   if (ok === false) st.loaded.delete(tab);
 };
@@ -1100,7 +1106,7 @@ const prefetchTab = (card, url, tab) => {
   st.loaded.add(tab);
   const panel = card.querySelector(`.ai-tabpanel[data-panel="${tab}"]`);
   return Promise.resolve()
-    .then(() => TAB_LOADERS[tab](url, panel, card))
+    .then(() => TAB_LOADERS[tab](url, panel, { card }))
     .then((ok) => { if (ok === false) st.loaded.delete(tab); return ok; })
     .catch((e) => { st.loaded.delete(tab); panelError(panel, e.message || '加载失败'); return false; });
 };
@@ -1305,6 +1311,48 @@ const bindCard = (cardEl, url) => {
     if (!pb || !cardEl.contains(pb)) return;
     const panel = pb.closest('.ai-tabpanel');
     openShareFor(cardEl, url, (panel && panel.dataset.panel) || 'summary');
+  });
+
+  /* 面板统一动作条（core.js panelActionsHtml）：重新生成/复制/下载全部卡片级委托，
+   * 文本取会话缓存（与屏显同源），菜单开合由 dl-toggle 承接、外部点击模块级监听收起 */
+  cardEl.addEventListener('click', async (e) => {
+    const toggle = e.target.closest('[data-act="dl-toggle"]');
+    if (toggle && cardEl.contains(toggle)) {
+      e.stopPropagation();
+      const menu = toggle.parentElement.querySelector('.panel-dl-menu');
+      document.querySelectorAll('.panel-dl-menu:not(.hidden)').forEach((m) => { if (m !== menu) m.classList.add('hidden'); });
+      if (menu) menu.classList.toggle('hidden');
+      return;
+    }
+    const opt = e.target.closest('.panel-dl-opt');
+    const btn = opt ? null : e.target.closest('.panel-act');
+    const src = opt || btn;
+    if (!src || !cardEl.contains(src)) return;
+    const panel = src.closest('.ai-tabpanel');
+    const kind = panel ? panel.dataset.panel : '';
+    if (opt) {
+      e.stopPropagation();
+      const menu = opt.closest('.panel-dl-menu');
+      if (menu) menu.classList.add('hidden');
+      try { await panelDownload(kind, opt.dataset.format || 'txt', url, cardEl); }
+      catch (err) { toast(err.message || '下载失败'); }
+      return;
+    }
+    const act = btn.dataset.act;
+    if (act === 'regen') {
+      const load = REGEN_LOAD[kind];
+      if (!load || !panel) return;
+      btn.disabled = true;   // 面板随即进入 loading 态，按钮可能已被替换：置灰/恢复对 detach 引用无害
+      try { await load(url, panel, { refresh: true }); } finally { btn.disabled = false; }
+    } else if (act === 'copy') {
+      const text = panelText(kind, url, cardEl, '');
+      if (!text) { toast('本 Tab 还没有可复制的内容'); return; }
+      const ok = await copyText(text);
+      toast(ok ? '已复制到剪贴板' : '复制失败，请手动选择文本');
+    } else if (act === 'download') {
+      try { await panelDownload(kind, btn.dataset.format || 'txt', url, cardEl); }
+      catch (err) { toast(err.message || '下载失败'); }
+    }
   });
 
   cardEl.querySelectorAll('[role="tab"]').forEach((tabBtn) => {

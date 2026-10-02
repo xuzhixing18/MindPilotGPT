@@ -13,7 +13,7 @@
  *   二选一（用我的版本覆盖 / 改用服务端版本）；beforeunload 走 fetch keepalive 兜底；
  * - 未登录渲染登录引导卡（私有资源永远要求登录）。
  */
-import { $, state, escapeHtml, fmtTs, relativeTime, bus, me, notesCache, copyText, ICON } from '../core.js';
+import { $, state, escapeHtml, fmtTs, relativeTime, bus, me, notesCache, copyText, panelActionsHtml } from '../core.js';
 import { openAuth } from '../auth-ui.js';
 
 const SAVE_DEBOUNCE = 800;   // 自动保存防抖（ms）
@@ -136,6 +136,8 @@ export const renderNotesPanel = (panel, ctx) => {
         note_id: target.id,
         title: noteTitle({ ...target, body }),
         excerpt: String(body).replace(TS_MARK_MD, '$1').slice(0, 300),
+        // 去时间戳语法后的全文：供统一动作条「复制/下载」（分享快照只用 excerpt，多余字段无害）
+        full: String(body).replace(TS_MARK_MD, '$1'),
         marks: (target.marks || []).length,
       };
     },
@@ -151,7 +153,8 @@ export const renderNotesPanel = (panel, ctx) => {
           <span class="notes-count rounded-full bg-slate-100 px-2 py-0.5 text-xs font-semibold text-slate-500"></span>
         </h4>
         <div class="flex shrink-0 items-center gap-3">
-          <button type="button" class="panel-share-btn inline-flex shrink-0 items-center gap-1 text-sm font-bold text-brand-600 transition hover:text-brand-700" title="分享本 Tab，弹窗内可全选/多选 Tab">${ICON.share}分享</button>
+          <!-- 统一动作条（无重生成概念）：分享/复制/下载由 result.js bindCard 卡片级委托承接 -->
+          ${panelActionsHtml({ regen: false, dlFmt: 'md', dlLabel: '下载笔记' })}
           <button type="button" class="notes-new inline-flex items-center gap-1 rounded-xl bg-cyan-500 px-3 py-1.5 text-sm font-bold text-white shadow-sm transition hover:bg-cyan-600 active:scale-95">
             <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>新建笔记
           </button>

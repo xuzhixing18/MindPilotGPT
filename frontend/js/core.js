@@ -359,6 +359,27 @@ export const ICON = {
   thumb: '<svg viewBox="0 0 24 24" class="h-3.5 w-3.5" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 9V5a3 3 0 00-6 0v4H5a2 2 0 00-2 2l1 8a2 2 0 002 2h11a2 2 0 002-1.6l1.2-7A2 2 0 0018.2 9H14z"/><path d="M8 9v12"/></svg>',
   play: '<svg viewBox="0 0 24 24" class="h-5 w-5" fill="currentColor" stroke="none"><path d="M8 5.5v13l11-6.5-11-6.5z"/></svg>',
   share: '<svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="M8.6 13.5l6.8 4M15.4 6.5l-6.8 4"/></svg>',
+  refresh: '<svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 11-2.6-6.4M21 3v6h-6"/></svg>',
+};
+
+/* ---------- AI Tab 面板统一动作条：重新生成 → 分享 → 复制 → 下载（固定顺序） ----------
+ * 纯 HTML 生成器（放 core.js 供 result.js 与 notes.js 共用，避免 views 间循环依赖）：
+ * 不绑事件，动作全部由 result.js bindCard 的卡片级委托承接（.panel-act data-act /
+ * .panel-dl-opt data-format / .panel-share-btn），面板 innerHTML 重渲染免疫。
+ * regen=false 用于无重生成概念的 Tab（qa/notes）；dlMenu 为多格式菜单
+ * [[fmt,label],...]，缺省则直接下载（格式=dlFmt）；extra 追加尾部按钮 HTML。 */
+export const panelActionsHtml = ({ regen = true, copy = true, dl = true, dlMenu = null, dlFmt = 'txt', dlLabel = '下载', extra = '' } = {}) => {
+  const act = 'panel-act inline-flex shrink-0 items-center gap-1 text-sm font-bold text-brand-600 transition hover:text-brand-700 disabled:cursor-default disabled:opacity-60';
+  const parts = [];
+  if (regen) parts.push(`<button type="button" class="${act}" data-act="regen" title="跳过缓存，重新生成本 Tab 内容">${ICON.refresh}重新生成</button>`);
+  parts.push(`<button type="button" class="panel-share-btn inline-flex shrink-0 items-center gap-1 text-sm font-bold text-brand-600 transition hover:text-brand-700" title="分享本 Tab，弹窗内可全选/多选 Tab">${ICON.share}分享</button>`);
+  if (copy) parts.push(`<button type="button" class="${act}" data-act="copy" title="复制本 Tab 内容到剪贴板">${ICON.copy}复制</button>`);
+  if (dl && dlMenu) {
+    parts.push(`<div class="relative inline-flex shrink-0"><button type="button" class="${act}" data-act="dl-toggle" title="选择下载格式">${ICON.dl}${escapeHtml(dlLabel)}${ICON.caret}</button><div class="panel-dl-menu absolute right-0 z-10 mt-1 hidden min-w-36 overflow-hidden rounded-xl border border-slate-200 bg-white py-1 shadow-card">${dlMenu.map(([f, l]) => `<button type="button" class="panel-dl-opt block w-full px-3 py-1.5 text-left text-sm text-slate-600 transition hover:bg-brand-50 hover:text-brand-600" data-format="${f}">${escapeHtml(l)}</button>`).join('')}</div></div>`);
+  } else if (dl) {
+    parts.push(`<button type="button" class="${act}" data-act="download" data-format="${dlFmt}" title="下载本 Tab 内容">${ICON.dl}${escapeHtml(dlLabel)}</button>`);
+  }
+  return parts.join('') + extra;
 };
 
 export const AI_CONFIG_HINT = '请复制 .env.example 为 .env 并填入 API Key 后重启服务。';

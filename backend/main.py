@@ -26,6 +26,7 @@ import shutil
 import sys
 from hashlib import sha1
 from pathlib import Path
+from typing import Any
 
 from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -94,6 +95,15 @@ def _cleanup(path_str: str) -> None:
         Path(path_str).unlink(missing_ok=True)
     except OSError:
         pass
+
+
+def _flag(v: Any, default: bool = False) -> bool:
+    """refresh 族字段的宽容归一：旧版前端曾把 DOM 对象塞进 refresh（序列化为 {}），
+    严格 bool 校验直接 422、detail 数组被前端渲染成 [object Object]。无构建静态
+    前端的旧客户端是运营现实，服务端兜底：仅 true/"true"/1 为 True，脏值落默认。"""
+    if v is None:
+        return default
+    return v is True or v == 1 or v == "true"
 
 
 @app.get("/api/health")
@@ -394,10 +404,11 @@ def get_stream(
 @app.post("/api/transcribe")
 def post_transcribe(
     url: str = Body(..., embed=True, min_length=1),
-    refresh: bool = Body(False, embed=True),
+    refresh: Any = Body(False, embed=True),
     user: auth.CurrentUser = _AUTH_GATE,
 ) -> JSONResponse:
     """提取视频字幕（转写）。同步 def → 由 Starlette 线程池执行，避免阻塞事件循环。"""
+    refresh = _flag(refresh)
     try:
         data = transcribe.transcribe(url, refresh=refresh)
     except ValueError as exc:  # TranscribeError 继承自 ValueError
@@ -417,12 +428,15 @@ def post_transcribe(
 @app.post("/api/summarize")
 def post_summarize(
     url: str = Body(..., embed=True, min_length=1),
-    refresh: bool = Body(False, embed=True),
+    refresh: Any = Body(False, embed=True),
+    refresh_transcribe: Any = Body(None, embed=True, description="字幕层是否重跑；None=跟随 refresh。总结 Tab 的「重新生成」传 false 只重算总结，不级联重做 ASR"),
     user: auth.CurrentUser = _AUTH_GATE,
 ) -> JSONResponse:
     """一站式：提取字幕 → 调用大模型生成结构化总结（摘要/要点/章节）。"""
+    refresh = _flag(refresh)
+    tr_refresh = refresh if refresh_transcribe is None else _flag(refresh_transcribe)
     try:
-        tr = transcribe.transcribe(url, refresh=refresh)
+        tr = transcribe.transcribe(url, refresh=tr_refresh)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
@@ -460,12 +474,15 @@ def post_summarize(
 @app.post("/api/mindmap")
 def post_mindmap(
     url: str = Body(..., embed=True, min_length=1),
-    refresh: bool = Body(False, embed=True),
+    refresh: Any = Body(False, embed=True),
+    refresh_transcribe: Any = Body(None, embed=True, description="字幕层是否重跑；None=跟随 refresh。导图 Tab 的「重新生成」传 false 只重算导图，不级联重做 ASR"),
     user: auth.CurrentUser = _AUTH_GATE,
 ) -> JSONResponse:
     """一站式：提取字幕 → 调用大模型生成层级思维导图（带缓存）。"""
+    refresh = _flag(refresh)
+    tr_refresh = refresh if refresh_transcribe is None else _flag(refresh_transcribe)
     try:
-        tr = transcribe.transcribe(url, refresh=refresh)
+        tr = transcribe.transcribe(url, refresh=tr_refresh)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
@@ -587,7 +604,7 @@ def post_qa(
 @app.post("/api/comments")
 def post_comments(
     url: str = Body(..., embed=True, min_length=1),
-    refresh: bool = Body(False, embed=True),
+    refresh: Any = Body(False, embed=True),
     limit: int = Body(20, embed=True, ge=1, le=50),
     user: auth.CurrentUser = _AUTH_GATE,
 ) -> JSONResponse:
@@ -595,6 +612,7 @@ def post_comments(
 
     与总结/导图不同：不依赖 LLM 配置，未配 Key 也能用，故无 503。
     """
+    refresh = _flag(refresh)
     try:
         data = comments.fetch_comments(url, refresh=refresh, limit=limit)
     except comments.CommentsNotSupportedError as exc:
