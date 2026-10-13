@@ -17,6 +17,7 @@ const template = () => `
       <button type="button" class="pv-scroll transition hover:text-brand-500" data-target="pv-features">功能</button>
       <button type="button" class="pv-scroll transition hover:text-brand-500" data-target="pv-how">如何使用</button>
       <button type="button" class="pv-scroll transition hover:text-brand-500" data-target="pv-pricing">定价</button>
+      <button type="button" class="pv-scroll transition hover:text-brand-500" data-target="pv-faq">常见问题</button>
     </div>
   </div>
 
@@ -173,6 +174,29 @@ const template = () => `
           <li class="flex gap-2"><span class="text-brand-500">✓</span> 多成员席位</li>
         </ul>
         <button data-pay="team" class="pay-btn mt-8 w-full rounded-2xl border border-slate-200 py-3 text-sm font-semibold text-slate-700 transition hover:border-brand-400 hover:text-brand-600">联系我们</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- 常见问题（GEO：可见 FAQ + index.html FAQPage JSON-LD 同一文案，结构化数据与可见内容一致） -->
+  <section id="pv-faq" class="mx-auto max-w-4xl px-4 py-16 sm:px-6">
+    <h2 class="text-center text-3xl font-bold tracking-tight text-slate-900 sm:text-4xl">常见问题</h2>
+    <div class="mt-10 space-y-8">
+      <div>
+        <h3 class="text-base font-semibold text-slate-900">MindPilot 是什么？</h3>
+        <p class="mt-2 text-sm leading-6 text-slate-500">MindPilot 是万能视频下载与 AI 分析工具：粘贴链接即可高速下载哔哩哔哩、YouTube、抖音、小红书、TikTok、Twitter/X、播客及 1000+ 站点的视频，支持高清清晰度选择、批量下载与仅音频提取，还能一键提取字幕并生成 AI 总结。</p>
+      </div>
+      <div>
+        <h3 class="text-base font-semibold text-slate-900">支持哪些视频平台？</h3>
+        <p class="mt-2 text-sm leading-6 text-slate-500">支持哔哩哔哩、YouTube、抖音、小红书、TikTok、Twitter/X、播客及 1000+ 站点；底层基于 10 万+ Star 的 yt-dlp 开源项目，持续跟进各平台变更。</p>
+      </div>
+      <div>
+        <h3 class="text-base font-semibold text-slate-900">MindPilot 免费吗？</h3>
+        <p class="mt-2 text-sm leading-6 text-slate-500">Free 方案免费开始，含每日 5 次下载、最高 720P 清晰度；Pro（¥29/月）解锁无限次下载、最高 4K 清晰度、批量下载与高速专用通道；Team（¥99/月）额外提供 API 接入与多成员席位。</p>
+      </div>
+      <div>
+        <h3 class="text-base font-semibold text-slate-900">除了下载，还有哪些 AI 分析能力？</h3>
+        <p class="mt-2 text-sm leading-6 text-slate-500">一键提取视频字幕，并用大模型生成摘要、要点与章节速览，长视频也能快速抓重点；手机、电脑、平板浏览器打开即用，无需安装 App。</p>
       </div>
     </div>
   </section>

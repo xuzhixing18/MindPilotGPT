@@ -1,6 +1,8 @@
 """seo 路由：站点级搜索引擎基础设施（规范见 docs/SEO优化工作流.md §5.3 / §7）。
 
-- GET /robots.txt   爬虫抓取规则（放行全站与静态资源，屏蔽 /api/，声明 sitemap）
+- GET /robots.txt   爬虫抓取规则（放行全站与静态资源，屏蔽 /api/，声明 sitemap；
+                    AI 搜索/引用类爬虫永远显式放行，训练类按 GEO_ALLOW_TRAIN_BOTS 开关）
+- GET /llms.txt     给 AI 引擎阅读的纯 Markdown 站点自述（llmstxt.org 新兴约定）
 - GET /sitemap.xml  首页 + 全部未撤销公开分享落地页（/s/{code} 是站内唯一可收录
                     的内容页：SSR 全量正文，hash 路由子视图对爬虫不可见）
 - GET / 与 /index.html  动态渲染 SPA 壳：把 index.html 中的 __SEO_BASE_URL__
@@ -35,8 +37,15 @@ def _base_url(request: Request) -> str:
 
 
 # --------------------------------------------------------------------------- #
-# robots.txt / sitemap.xml
+# robots.txt / llms.txt / sitemap.xml
 # --------------------------------------------------------------------------- #
+# AI 搜索/引用类爬虫：永远显式放行（GEO 技术基础，docs/GEO优化入门指南.md 技巧⑥）。
+# 单独成组是防未来调整通配组时误伤——被 AI 引用是 GEO 的命根子。
+_AI_SEARCH_BOTS = ("OAI-SearchBot", "ChatGPT-User", "PerplexityBot", "Claude-User", "GoogleOther")
+# 训练类爬虫：GEO_ALLOW_TRAIN_BOTS=false 时整组 Disallow（默认放行，不输出此组）
+_AI_TRAIN_BOTS = ("GPTBot", "Google-Extended", "CCBot", "Bytespider", "anthropic-ai")
+
+
 @router.get("/robots.txt")
 def robots_txt(request: Request) -> Response:
     """爬虫规则：只屏蔽 /api/（JSON 端点无收录价值且防爬虫打进业务接口）。
@@ -44,14 +53,46 @@ def robots_txt(request: Request) -> Response:
     不屏蔽 CSS/JS（工作流 §5.3：Google 需要渲染资源）；/s/ 落地页显式放行
     （公开分享本体即免费内容，是站点长尾流量的主要来源）。
     """
-    body = (
-        "User-agent: *\n"
-        "Allow: /\n"
-        "Disallow: /api/\n"
-        "\n"
-        f"Sitemap: {_base_url(request)}/sitemap.xml\n"
-    )
+    groups = [f"User-agent: {bot}\nAllow: /" for bot in _AI_SEARCH_BOTS]
+    if not config.allow_train_bots():
+        agents = "\n".join(f"User-agent: {bot}" for bot in _AI_TRAIN_BOTS)
+        groups.append(f"# 训练类 AI 爬虫已禁用（GEO_ALLOW_TRAIN_BOTS=false）\n{agents}\nDisallow: /")
+    groups.append("User-agent: *\nAllow: /\nDisallow: /api/")
+    groups.append(f"Sitemap: {_base_url(request)}/sitemap.xml")
+    body = "\n\n".join(groups) + "\n"
     return Response(content=body, media_type="text/plain; charset=utf-8",
+                    headers={"Cache-Control": "public, max-age=3600"})
+
+
+_LLMS_TEMPLATE = """# {name}
+
+> {description}
+
+## 核心能力
+- 视频解析下载：B站、YouTube、抖音、小红书、TikTok、Twitter/X 等 20+ 平台，支持清晰度选择、仅音频提取与批量解析
+- 字幕提取与转写：平台内嵌字幕优先，缺失时自动语音识别，支持时间戳定位
+- AI 结构化总结：概述、关键要点、章节速览
+- AI 思维导图：自动生成章节层级，支持 PNG / SVG / Markdown / XMind 导出
+- 高赞评论：按点赞热度抓取 B站/抖音/通用网页的热门评论
+- 多轮 AI 问答与随手笔记：基于字幕上下文答疑，Markdown 笔记可随视频分享
+
+## 公开内容页
+- {base}/s/{{code}} 为公开分享的视频分析快照页（服务端渲染、无需登录）：含 AI 总结、字幕节选、章节速览与问答记录，欢迎引用。
+- 站点地图：{base}/sitemap.xml
+"""
+
+
+@router.get("/llms.txt")
+def llms_txt(request: Request) -> Response:
+    """llms.txt（llmstxt.org 约定）：给 AI 引擎阅读的纯 Markdown 站点自述。
+
+    新兴约定、采用率仍在演进，但成本趋零无害；文案与首页可见内容同一事实源
+    （config.SITE_*），不虚构能力承诺。
+    """
+    body = _LLMS_TEMPLATE.format(
+        name=config.SITE_NAME, description=config.SITE_DESCRIPTION, base=_base_url(request),
+    )
+    return Response(content=body, media_type="text/markdown; charset=utf-8",
                     headers={"Cache-Control": "public, max-age=3600"})
 
 

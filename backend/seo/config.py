@@ -36,3 +36,14 @@ def public_base_url() -> str:
 def sitemap_share_limit() -> int:
     """sitemap.xml 收录的公开分享条数上限（默认 2000；单文件协议上限 50000）。"""
     return max(0, _int("SITEMAP_SHARE_LIMIT", 2000))
+
+
+def allow_train_bots() -> bool:
+    """是否放行训练类 AI 爬虫（GPTBot/Google-Extended 等）；默认放行。
+
+    GEO 产品决策开关（docs/GEO优化入门指南.md 技巧⑥）：「被 AI 搜索引用」与
+    「被 AI 拿去训练」是两件事——搜索/引用类爬虫永远显式放行（robots.txt 内
+    硬编码），训练类设 GEO_ALLOW_TRAIN_BOTS=false 即整组 Disallow。
+    """
+    raw = (os.getenv("GEO_ALLOW_TRAIN_BOTS") or "true").strip().lower()
+    return raw not in ("false", "0", "no", "off")

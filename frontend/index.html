@@ -39,6 +39,37 @@
   }
   </script>
 
+  <!-- FAQPage 结构化数据（GEO 技巧②，docs/GEO优化入门指南.md）：问答文案与首页视图
+       可见「常见问题」区（parse.js #pv-faq）及下方 noscript 兜底一致，改一处须同步三处 -->
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "FAQPage",
+    "mainEntity": [
+      {
+        "@type": "Question",
+        "name": "MindPilot 是什么？",
+        "acceptedAnswer": { "@type": "Answer", "text": "MindPilot 是万能视频下载与 AI 分析工具：粘贴链接即可高速下载哔哩哔哩、YouTube、抖音、小红书、TikTok、Twitter/X、播客及 1000+ 站点的视频，支持高清清晰度选择、批量下载与仅音频提取，还能一键提取字幕并生成 AI 总结。" }
+      },
+      {
+        "@type": "Question",
+        "name": "支持哪些视频平台？",
+        "acceptedAnswer": { "@type": "Answer", "text": "支持哔哩哔哩、YouTube、抖音、小红书、TikTok、Twitter/X、播客及 1000+ 站点；底层基于 10 万+ Star 的 yt-dlp 开源项目，持续跟进各平台变更。" }
+      },
+      {
+        "@type": "Question",
+        "name": "MindPilot 免费吗？",
+        "acceptedAnswer": { "@type": "Answer", "text": "Free 方案免费开始，含每日 5 次下载、最高 720P 清晰度；Pro（¥29/月）解锁无限次下载、最高 4K 清晰度、批量下载与高速专用通道；Team（¥99/月）额外提供 API 接入与多成员席位。" }
+      },
+      {
+        "@type": "Question",
+        "name": "除了下载，还有哪些 AI 分析能力？",
+        "acceptedAnswer": { "@type": "Answer", "text": "一键提取视频字幕，并用大模型生成摘要、要点与章节速览，长视频也能快速抓重点；手机、电脑、平板浏览器打开即用，无需安装 App。" }
+      }
+    ]
+  }
+  </script>
+
   <!-- 网站图标：内联 SVG（品牌蓝圆角方块 + 播放键），免额外请求 -->
   <link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2024%2024'%3E%3Crect%20width='24'%20height='24'%20rx='6'%20fill='%231677FF'/%3E%3Cpath%20d='M9%206.5v11l9-5.5z'%20fill='white'/%3E%3C/svg%3E" />
   <script src="https://cdn.tailwindcss.com"></script>
@@ -469,6 +500,11 @@
         <li>高赞评论抓取与 AI 多轮问答</li>
         <li>随手笔记：时间戳标记、视频截图、Markdown 编辑</li>
       </ul>
+      <h2 style="font-size:18px;margin:20px 0 8px">常见问题</h2>
+      <p style="margin:0 0 8px"><b>MindPilot 是什么？</b>万能视频下载与 AI 分析工具：粘贴链接即可高速下载哔哩哔哩、YouTube、抖音、小红书、TikTok、Twitter/X、播客及 1000+ 站点的视频，支持高清清晰度选择、批量下载与仅音频提取，还能一键提取字幕并生成 AI 总结。</p>
+      <p style="margin:0 0 8px"><b>支持哪些视频平台？</b>哔哩哔哩、YouTube、抖音、小红书、TikTok、Twitter/X、播客及 1000+ 站点；底层基于 10 万+ Star 的 yt-dlp 开源项目，持续跟进各平台变更。</p>
+      <p style="margin:0 0 8px"><b>MindPilot 免费吗？</b>Free 方案免费开始，含每日 5 次下载、最高 720P 清晰度；Pro（¥29/月）解锁无限次下载、最高 4K 清晰度、批量下载与高速专用通道；Team（¥99/月）额外提供 API 接入与多成员席位。</p>
+      <p style="margin:0 0 8px"><b>除了下载，还有哪些 AI 分析能力？</b>一键提取视频字幕，并用大模型生成摘要、要点与章节速览，长视频也能快速抓重点；手机、电脑、平板浏览器打开即用，无需安装 App。</p>
       <p style="margin-top:20px;color:#64748b;font-size:14px">本站为单页应用，完整交互体验需启用 JavaScript。</p>
     </div>
   </noscript>

@@ -48,6 +48,25 @@ def _clean_snapshot(kind: str, snap: dict[str, Any], normalized: str) -> tuple[s
     if model_label:
         payload["model_label"] = model_label
 
+    # 章节速览（video/summary 上报；落地页渲染可见列表，GEO 多模态技巧④）：
+    # title 必填截断；start 可选秒数（AI 章节无时间戳时为 None，非法值归 None）
+    chs = []
+    for c in (snap.get("chapters") or [])[: config.CHAPTERS_MAX]:
+        if not isinstance(c, dict):
+            continue
+        t = _clip(c.get("title"), config.CH_TITLE_MAX)
+        if not t:
+            continue
+        try:
+            start = float(c.get("start")) if c.get("start") is not None else None
+            if start is not None and not 0 <= start < 24 * 3600:
+                start = None
+        except (TypeError, ValueError):
+            start = None
+        chs.append({"title": t, "start": start})
+    if chs:
+        payload["chapters"] = chs
+
     if kind == "mindmap":
         nodes = [
             _clip(t, config.NODE_MAX)

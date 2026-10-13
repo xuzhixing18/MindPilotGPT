@@ -1168,6 +1168,10 @@ const snapshotFor = (cardEl, url, kind) => {
       snapshot: {
         excerpt: s.one_line || String(s.summary || '').slice(0, 300),
         bullets: (s.key_points || []).slice(0, 3),
+        // 章节速览（GEO：落地页渲染可见章节列表）；AI 章节无时间戳时 start 为 null
+        chapters: (s.chapters || []).slice(0, 10)
+          .map((c) => ({ title: String((c && c.title) || '').slice(0, 60), start: c && c.start != null ? Number(c.start) : null }))
+          .filter((c) => c.title),
         model_label: s.model || '',
       },
       refId: '',
