@@ -6,10 +6,15 @@ title + 正文第一张图**——故 ``<title>`` 用视频标题、正文首图
 
 页面纯静态（无 JS 依赖）：匿名接收者无需登录即可读快照；CTA 跳 SPA 深链
 （``#/v?url=&tab=``）解锁完整分析。所有动态内容全量转义（含 og 属性引号）。
+
+SEO 对齐 docs/SEO优化工作流.md：完整 TDK + canonical + OG/Twitter Card +
+JSON-LD（Article）结构化数据；落地页是站内唯一可被收录的 SSR 内容页（长尾
+流量入口，robots 显式 index,follow）；失效页（410/404）noindex 防收录残留。
 """
 
 from __future__ import annotations
 
+import json
 from html import escape
 from typing import Any
 
@@ -117,18 +122,43 @@ def _section(share: dict[str, Any]) -> str:
     return "".join(parts)
 
 
+def _jsonld(share: dict[str, Any], title_plain: str, desc_plain: str,
+            og_image: str, share_url: str) -> str:
+    """Article 结构化数据（富摘要候选）；``</`` 转义防提前闭合 script 标签。"""
+    created = share.get("created_at") or ""
+    ld: dict[str, Any] = {
+        "@context": "https://schema.org",
+        "@type": "Article",
+        "headline": title_plain[:110],
+        "description": desc_plain,
+        "inLanguage": "zh-CN",
+        "author": {"@type": "Organization", "name": "MindPilot"},
+        "publisher": {"@type": "Organization", "name": "MindPilot"},
+        "mainEntityOfPage": share_url,
+    }
+    if og_image:
+        ld["image"] = [og_image]
+    if created:
+        ld["datePublished"] = f"{created}Z"   # 库内为 naive UTC ISO 串
+    return json.dumps(ld, ensure_ascii=False).replace("</", "<\\/")
+
+
 def render(share: dict[str, Any], base_url: str) -> str:
-    """落地页 HTML（og meta + 首图兜底 + 快照正文 + CTA）。"""
-    title = escape(share.get("title") or "一段值得看的视频")
+    """落地页 HTML（完整 TDK + OG/Twitter + JSON-LD + 首图兜底 + 快照正文 + CTA）。"""
+    title_plain = share.get("title") or "一段值得看的视频"
+    title = escape(title_plain)
     if share["kind"] == "bundle":
         names = [KIND_LABELS.get(k, k) for k in ((share.get("payload") or {}).get("kinds") or [])]
         kind_label = "AI 分析合辑 · " + "、".join(names) if names else "AI 分析合辑"
     else:
         kind_label = KIND_LABELS.get(share["kind"], "视频")
     excerpt = share.get("excerpt") or ""
-    desc = escape((excerpt or f"MindPilot AI 解析：{share.get('title') or ''}")[:120])
+    # description 前 150 字放核心信息（Google 截断位），尾部行动号召提升点击率
+    desc_plain = f"{(excerpt or title_plain)[:150]}——由 MindPilot AI 解析生成，无需登录即可浏览，点击查看完整分析。"
+    desc = escape(desc_plain)
+    share_url = share.get("share_url") or f"{base_url}/s/{share.get('code', '')}"
     og_image = _og_image(share, base_url)
-    cover = f'<img class="cover" src="{escape(share["thumb_url"])}" alt="封面" referrerpolicy="no-referrer"/>' \
+    cover = f'<img class="cover" src="{escape(share["thumb_url"])}" alt="{escape(title_plain[:60])} 视频封面" referrerpolicy="no-referrer"/>' \
         if share.get("thumb_url") else ""
     model = escape((share.get("payload") or {}).get("model_label") or "")
     meta_bits = [kind_label]
@@ -143,12 +173,22 @@ def render(share: dict[str, Any], base_url: str) -> str:
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>{title} · MindPilot AI 视频分析</title>
+<meta name="description" content="{desc}"/>
+<meta name="keywords" content="MindPilot,AI视频分析,视频总结,字幕提取,思维导图,高赞评论,AI问答"/>
+<meta name="robots" content="index,follow"/>
+<link rel="canonical" href="{escape(share_url, quote=True)}"/>
 <meta property="og:title" content="{title}"/>
 <meta property="og:description" content="{desc}"/>
 <meta property="og:type" content="article"/>
-<meta property="og:url" content="{escape(share.get('share_url') or '', quote=True)}"/>
+<meta property="og:url" content="{escape(share_url, quote=True)}"/>
+<meta property="og:locale" content="zh_CN"/>
+<meta property="og:site_name" content="MindPilot"/>
 {f'<meta property="og:image" content="{escape(og_image)}"/>' if og_image else ''}
 <meta name="twitter:card" content="summary_large_image"/>
+<meta name="twitter:title" content="{title}"/>
+<meta name="twitter:description" content="{desc}"/>
+{f'<meta name="twitter:image" content="{escape(og_image)}"/>' if og_image else ''}
+<script type="application/ld+json">{_jsonld(share, title_plain, desc_plain, og_image, share_url)}</script>
 <style>{_STYLE}</style>
 </head>
 <body>
@@ -170,12 +210,13 @@ def render(share: dict[str, Any], base_url: str) -> str:
 
 
 def render_gone(headline: str, tip: str) -> str:
-    """失效页（410 撤销 / 404 不存在共用骨架）。"""
+    """失效页（410 撤销 / 404 不存在共用骨架）；noindex 防失效链接残留收录。"""
     return f"""<!doctype html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
+<meta name="robots" content="noindex,nofollow"/>
 <title>{escape(headline)} · MindPilot</title>
 <style>{_STYLE}</style>
 </head>

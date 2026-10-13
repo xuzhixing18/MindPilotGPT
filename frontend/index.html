@@ -1,10 +1,46 @@
 <!DOCTYPE html>
 <html lang="zh-CN" class="scroll-smooth">
 <head>
+  <!-- ========== 基础必需标签 ========== -->
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>MindPilot · 万能视频下载 — 一键保存任意平台视频</title>
-  <meta name="description" content="粘贴链接即可高速下载 B站 / YouTube / 抖音 / 小红书 / TikTok 等 20+ 平台视频，手机电脑通用，支持批量下载与高清清晰度选择。" />
+  <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+  <meta name="format-detection" content="telephone=no" />
+
+  <!-- ========== 核心 TDK（规范见 docs/SEO优化工作流.md §1；三段式：页面名称 - 产品名称 | 核心介绍） ========== -->
+  <title>MindPilot - 万能视频下载与AI视频分析工具 | 字幕转写·AI总结·思维导图</title>
+  <meta name="description" content="MindPilot 是一站式视频下载与 AI 分析工具：粘贴链接即可高速下载 B站、YouTube、抖音、小红书、TikTok 等 20+ 平台视频，自动提取字幕并生成 AI 总结、思维导图、高赞评论与多轮问答，支持随手笔记和一键分享，立即免费体验。" />
+  <meta name="keywords" content="视频下载,AI视频分析,字幕提取,视频转文字,AI总结,思维导图,B站视频下载,抖音视频下载,YouTube下载,MindPilot" />
+
+  <!-- ========== 爬虫控制与规范链接（__SEO_BASE_URL__ 由后端 seo 包按 PUBLIC_BASE_URL 动态注入，
+       未配置时回退请求 base_url；hash 路由的子视图对爬虫不可见，canonical 恒指首页） ========== -->
+  <meta name="robots" content="index, follow" />
+  <link rel="canonical" href="__SEO_BASE_URL__/" />
+
+  <!-- ========== Open Graph（og:image 待品牌封面图 1200x630 资产就绪后补充） ========== -->
+  <meta property="og:title" content="MindPilot - 万能视频下载与AI视频分析工具" />
+  <meta property="og:description" content="粘贴链接即可高速下载 20+ 平台视频，自动提取字幕并生成 AI 总结、思维导图、高赞评论与多轮问答。" />
+  <meta property="og:type" content="website" />
+  <meta property="og:url" content="__SEO_BASE_URL__/" />
+  <meta property="og:locale" content="zh_CN" />
+  <meta property="og:site_name" content="MindPilot" />
+
+  <!-- ========== Schema.org 结构化数据（JSON-LD） ========== -->
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "WebSite",
+    "name": "MindPilot",
+    "alternateName": "MindPilot AI 视频分析",
+    "url": "__SEO_BASE_URL__/",
+    "description": "一站式视频下载与 AI 分析工具：字幕转写、AI 总结、思维导图、高赞评论、多轮问答与随手笔记。",
+    "inLanguage": "zh-CN",
+    "publisher": { "@type": "Organization", "name": "MindPilot", "url": "__SEO_BASE_URL__/" }
+  }
+  </script>
+
+  <!-- 网站图标：内联 SVG（品牌蓝圆角方块 + 播放键），免额外请求 -->
+  <link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2024%2024'%3E%3Crect%20width='24'%20height='24'%20rx='6'%20fill='%231677FF'/%3E%3Cpath%20d='M9%206.5v11l9-5.5z'%20fill='white'/%3E%3C/svg%3E" />
   <script src="https://cdn.tailwindcss.com"></script>
   <script>
     tailwind.config = {
@@ -417,6 +453,25 @@
       </div>
     </div>
   </div>
+
+  <!-- 无 JS 兜底（渐进增强）：百度等不执行 JS 的爬虫与禁用脚本的用户可读的核心内容；
+       JS 启用时 noscript 不渲染，页面唯一 H1 由首页视图（parse.js Hero）提供，不会重复 -->
+  <noscript>
+    <div style="max-width:640px;margin:0 auto;padding:40px 16px;font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;color:#0f172a;line-height:1.7">
+      <h1 style="font-size:24px;margin:0 0 12px">MindPilot - 万能视频下载与 AI 视频分析工具</h1>
+      <p>粘贴链接即可高速下载哔哩哔哩、YouTube、抖音、小红书、TikTok 等 20+ 平台视频，手机电脑通用，支持批量下载与高清清晰度选择。</p>
+      <h2 style="font-size:18px;margin:20px 0 8px">核心功能</h2>
+      <ul style="padding-left:20px;margin:0">
+        <li>视频解析与高速下载（1080P/720P 清晰度选择、仅音频提取、批量解析）</li>
+        <li>字幕提取与转写：平台内嵌字幕优先，无字幕时自动语音识别（ASR）</li>
+        <li>AI 结构化总结：摘要、关键要点、章节速览</li>
+        <li>AI 思维导图：层级大纲自动生成，支持导出 PNG / SVG / XMind</li>
+        <li>高赞评论抓取与 AI 多轮问答</li>
+        <li>随手笔记：时间戳标记、视频截图、Markdown 编辑</li>
+      </ul>
+      <p style="margin-top:20px;color:#64748b;font-size:14px">本站为单页应用，完整交互体验需启用 JavaScript。</p>
+    </div>
+  </noscript>
 
   <script type="module" src="/js/main.js"></script>
 </body>

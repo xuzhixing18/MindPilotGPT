@@ -33,6 +33,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.background import BackgroundTask
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 # 兼容两种运行方式：
 #   1) 包方式：python -m backend.main / uvicorn backend.main:app
@@ -42,7 +43,7 @@ _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from backend import ai, auth, comments, downloader, library, notes, share, storage, transcribe
+from backend import ai, auth, comments, downloader, library, notes, seo, share, storage, transcribe
 from backend.downloader.common import DOWNLOAD_DIR
 
 # 前端静态目录：项目根目录下的 frontend/
@@ -80,6 +81,13 @@ app.include_router(notes.router)
 # 公开 /s/{code}、/api/share/* 不挂门禁（分享本体即公开物），限流在包内滑动窗口。
 app.add_exception_handler(share.ShareError, share.share_error_handler)
 app.include_router(share.router)
+
+# SEO 基础设施包：/robots.txt、/sitemap.xml 与 "/"、"/index.html" 动态渲染（注入
+# canonical/og:url 的站点绝对地址）。路由先于末尾 StaticFiles mount 注册即优先匹配；
+# StarletteHTTPException 处理器覆写默认行为：非 /api 路径的 404 返回品牌化 HTML 页，
+# 其余状态码与 /api 路径保持 FastAPI 默认 JSON 语义（含 headers 透传）。
+app.add_exception_handler(StarletteHTTPException, seo.http_exception_handler)
+app.include_router(seo.router)
 
 # 业务端点统一门禁（/api/health 与 /api/auth/* 不在此列，保持开放以供前端探测与登录）：
 #   AUTH_ENABLED=false（默认）              → 完全放行，行为与改造前一致；

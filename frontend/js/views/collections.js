@@ -144,6 +144,7 @@ const loadCollections = async () => {
 
 export const collectionsView = {
   title: '合集',
+  description: '我的合集：收藏与管理视频解析结果，按主题归类随时回看。',
   mount(container, ctx) {
     listRoot = container;
     container.classList.add('px-4', 'py-6', 'sm:px-6');
@@ -241,6 +242,7 @@ const loadDetail = async () => {
 
 export const collectionDetailView = {
   title: '合集详情',
+  description: '合集详情：查看合集内收藏的视频与 AI 解析内容。',
   mount(container, ctx) {
     detailRoot = container;
     detailId = ctx.params.id;

@@ -182,6 +182,7 @@ const reload = () => loadPage(true);
 /* ---------- 视图对象 ---------- */
 export default {
   title: '历史记录',
+  description: '我的历史记录：回看解析过的视频、AI 总结、思维导图与随手笔记。',
   mount(container, ctx) {
     root = container;
     container.classList.add('px-4', 'py-6', 'sm:px-6');

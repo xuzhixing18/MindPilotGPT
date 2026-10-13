@@ -160,6 +160,22 @@ def share_find_active(
         return _share_dict(row) if row else None
 
 
+def share_list_public(limit: int = 2000) -> list[dict[str, Any]]:
+    """全部未撤销分享（sitemap.xml 数据源，seo 包调用）。
+
+    跨用户公开读——分享本体即公开物；但只回 code/created_at 两列（不碰快照正文，
+    更不含 user_id），created_at 倒序取前 limit 条。
+    """
+    with session() as s:
+        rows = s.execute(
+            select(models.Share.code, models.Share.created_at)
+            .where(models.Share.revoked_at.is_(None))
+            .order_by(models.Share.created_at.desc())
+            .limit(limit)
+        ).all()
+    return [{"code": r.code, "created_at": _iso(r.created_at)} for r in rows]
+
+
 def share_list(
     user_id: str, limit: int = 50, offset: int = 0,
 ) -> tuple[list[dict[str, Any]], int]:

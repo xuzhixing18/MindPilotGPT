@@ -1425,6 +1425,7 @@ const renderBatch = async (container, urls) => {
 /* ---------- 视图对象 ---------- */
 export default {
   title: '解析结果',
+  description: '视频解析结果：AI 总结、字幕文本、思维导图、高赞评论、AI 问答与随手笔记一站式查看。',
   mount(container, ctx) {
     const urls = ctx.query.getAll('url').map((u) => u.trim()).filter(Boolean);
     if (!urls.length) {

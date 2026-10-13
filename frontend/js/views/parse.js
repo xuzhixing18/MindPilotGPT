@@ -212,6 +212,7 @@ const openPayModal = (plan) => {
 /* ---------- 视图对象 ---------- */
 export default {
   title: '万能视频下载',
+  description: '一站式视频下载与 AI 分析：粘贴链接即可高速下载 20+ 平台视频，自动提取字幕并生成 AI 总结、思维导图、高赞评论与多轮问答。',
   mount(container) {
     root = container;
     batchMode = false;

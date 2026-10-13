@@ -2,7 +2,7 @@
  *
  * 采用「注册表」而非直接 import 各视图：main.js 负责装配路由，视图只单向依赖
  * router 的 navigate/currentRoute，规避 router ↔ views 循环依赖。
- * 视图接口：{ title?, mount(container, ctx), unmount?() }，ctx = { params, query, path }。
+ * 视图接口：{ title?, description?, mount(container, ctx), unmount?() }，ctx = { params, query, path }。
  */
 import { bus, state } from './core.js';
 
@@ -40,6 +40,23 @@ const resolve = (path, query) => {
   return null;
 };
 
+/* SEO 渐进增强：路由切换时同步 document.title 与 meta description / OG 标签。
+ * hash 子视图对爬虫基本不可见（canonical 恒指首页），这里主要服务能执行 JS 的
+ * Google 与站内再分享场景（微信等读 OG）。只改 index.html 头部已静态声明的
+ * 标签 content，不增删节点；视图未提供 description 时保持默认文案不动。 */
+const setMeta = (selector, value) => {
+  const el = document.querySelector(selector);
+  if (el && value) el.setAttribute('content', value);
+};
+const syncSeo = (view) => {
+  const title = view.title ? `${view.title} · MindPilot` : 'MindPilot - 万能视频下载与AI视频分析工具 | 字幕转写·AI总结·思维导图';
+  document.title = title;
+  setMeta('meta[name="description"]', view.description);
+  setMeta('meta[property="og:title"]', title);
+  setMeta('meta[property="og:description"]', view.description);
+  setMeta('meta[property="og:url"]', location.href);
+};
+
 const render = () => {
   const { path, query } = parseHash();
   const hit = resolve(path, query);
@@ -51,7 +68,7 @@ const render = () => {
   current = { path, query, params: hit.params, view: hit.view };
   rootEl.innerHTML = '';
   rootEl.className = baseRootClass;   // 复位容器类：上一个视图加的布局类（如 max-w）不得带到本视图
-  if (hit.view.title) document.title = `${hit.view.title} · MindPilot`;
+  syncSeo(hit.view);                  // title/description/OG 随路由同步（SEO 渐进增强）
   try {
     hit.view.mount(rootEl, { params: hit.params, query, path });
   } catch (e) {
