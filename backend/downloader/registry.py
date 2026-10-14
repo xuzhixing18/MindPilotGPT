@@ -10,10 +10,13 @@
 
 from __future__ import annotations
 
-from backend.downloader import douyin
+from backend.downloader import douyin, wechat_channels
 
-# 专用解析器列表：每个模块需暴露 can_handle / extract_info / download
+# 专用解析器列表：每个模块需暴露 can_handle / extract_info / download。
+# 置首的是微信视频号拦截器：非解析器，而是在白屏阶段就给中文指引，
+# 避免 yt-dlp 白跑完整超时链后抛生英文 Unsupported URL（见模块 docstring）。
 SPECIFIC_EXTRACTORS = [
+    wechat_channels,
     douyin,
     # bilibili,   # 未来按需新增
     # tiktok,

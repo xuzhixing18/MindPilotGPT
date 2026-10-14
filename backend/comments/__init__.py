@@ -18,13 +18,13 @@ from __future__ import annotations
 from typing import Any
 
 from backend import storage
-from backend.comments import bilibili, douyin, generic
+from backend.comments import bilibili, douyin, generic, ximalaya
 from backend.comments.errors import CommentsError, CommentsNotSupportedError
 
 DEFAULT_LIMIT = 20
 
 # 专用平台在前（越靠前优先级越高），generic 兜底
-_PLATFORMS = [bilibili, douyin]
+_PLATFORMS = [bilibili, douyin, ximalaya]
 
 
 def _pick(url: str):
