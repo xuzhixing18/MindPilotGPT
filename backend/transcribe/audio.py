@@ -1,8 +1,12 @@
 """音频获取（供 ASR 兜底）—— 把视频 URL 变成一个可上传的音频文件。
 
-字幕抓不到时，门面会调用本模块拿音频再交给 ASR。路由与下载层一致：
-- 抖音：走 backend.downloader.douyin 下载无水印视频（含音频轨），再用 ffmpeg 抽音频；
-- 其他平台：走 yt-dlp 抓 bestaudio（按需注入 Cookie）。
+字幕抓不到时，门面会调用本模块拿音频再交给 ASR。路由与下载层**共用同一注册表**：
+- downloader 注册表命中的专用解析器（抖音 / 快手等无 yt-dlp 提取器的平台）：走其
+  ``download`` 下无水印视频（含音频轨）→ ffmpeg 抽音频；
+- 未命中（generic 平台，如 B站/YouTube）：走 yt-dlp 抓 bestaudio（按需注入 Cookie）。
+
+这样「新增平台只要在下层 registry 注册」即自动获得音频获取能力，本文件无需再按平台
+逐个加分支（延续门面 + 可插拔风格，修掉此前硬编码 douyin 一支、快手落 yt-dlp 失败的坑）。
 
 统一转成 16kHz 单声道 mp3：体积小（满足 DashScope base64 ≤10MB）、格式通用、
 对语音识别足够；无 ffmpeg 时原样返回下载到的音频容器（SenseVoiceSmall 亦接受 m4a 等）。
@@ -18,7 +22,8 @@ from typing import Any
 from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError
 
-from backend.downloader import common, douyin
+from backend import downloader  # 门面：按注册表路由到专用解析器（与下载层同一判据）
+from backend.downloader import common, generic
 from backend.transcribe import subtitles  # 复用其 _apply_cookies（同为 yt-dlp opts 注入）
 
 # 与下载/字幕共用同一临时目录（音频用完即清）
@@ -34,11 +39,15 @@ class AudioError(ValueError):
 def acquire_audio(url: str) -> tuple[Path, str]:
     """获取 URL 对应的音频文件。
 
+    路由与下载层一致：downloader 注册表命中专用解析器（抖音/快手等）则用其 ``download``
+    下无水印视频再抽音频；未命中（generic 平台）走 yt-dlp bestaudio。
+
     :return: (音频文件路径, 标题)。调用方负责用后删除该文件。
     :raises AudioError: 下载或转码失败
     """
-    if douyin.can_handle(url):
-        return _douyin_audio(url)
+    mod = downloader._pick(url)
+    if mod is not generic:
+        return _specific_audio(mod, url)
     return _ytdlp_audio(url)
 
 
@@ -67,16 +76,21 @@ def _to_mono_mp3(src: Path) -> Path:
     return src
 
 
-def _douyin_audio(url: str) -> tuple[Path, str]:
-    """抖音：下载无水印视频（含音频轨）→ ffmpeg 抽音频。"""
+def _specific_audio(mod, url: str) -> tuple[Path, str]:
+    """专用解析器（抖音/快手等）：下无水印视频（含音频轨）→ ffmpeg 抽音频。
+
+    各专用模块的 download 抛的都是 ValueError 子类（DouyinError/KuaishouError），
+    统一按 ValueError 捕获转 AudioError；返回结构同构，取 filepath/title。
+    """
+    name = mod.__name__.rsplit(".", 1)[-1]
     try:
-        res = douyin.download(url)  # format_id 为空 -> 无水印 mp4
-    except douyin.DouyinError as exc:
-        raise AudioError(f"下载抖音音频失败：{exc}") from exc
+        res = mod.download(url)
+    except ValueError as exc:
+        raise AudioError(f"下载{name}音频失败：{exc}") from exc
     src = Path(res["filepath"])
     if not src.is_file():
-        raise AudioError("抖音视频下载结果为空，无法提取音频。")
-    title = res.get("title") or "抖音视频"
+        raise AudioError(f"{name}视频下载结果为空，无法提取音频。")
+    title = res.get("title") or f"{name}视频"
     return _to_mono_mp3(src), title
 
 

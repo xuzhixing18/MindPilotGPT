@@ -63,6 +63,12 @@ def _no_subtitle_hint(url: str, sub_error: Exception) -> str:
             "COOKIES_FROM_BROWSER=edge（或 COOKIE_FILE 指向 cookies.txt）后重启；"
             "或设置 DASHSCOPE_API_KEY / SILICONFLOW_API_KEY 启用语音识别兜底。"
         )
+    if "kuaishou.com" in host or "gifshow.com" in host or "kwai.com" in host:
+        return (
+            "快手短视频没有独立字幕轨，无法直接提取字幕。可配置语音识别(ASR)兜底：在 .env 设置 "
+            "DASHSCOPE_API_KEY（百炼 Fun-ASR，转写带句级时间戳）或 SILICONFLOW_API_KEY（免费但无时间戳）"
+            "后重启服务即可转写。"
+        )
     return (
         f"{sub_error} 可在 .env 设置 DASHSCOPE_API_KEY（百炼 Fun-ASR，带时间戳）"
         "或 SILICONFLOW_API_KEY（免费无时间戳）启用语音识别(ASR)兜底后重试。"

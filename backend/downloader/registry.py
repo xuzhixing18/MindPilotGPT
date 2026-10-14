@@ -10,7 +10,7 @@
 
 from __future__ import annotations
 
-from backend.downloader import douyin, wechat_channels
+from backend.downloader import douyin, kuaishou, wechat_channels
 
 # 专用解析器列表：每个模块需暴露 can_handle / extract_info / download。
 # 置首的是微信视频号拦截器：非解析器，而是在白屏阶段就给中文指引，
@@ -18,6 +18,7 @@ from backend.downloader import douyin, wechat_channels
 SPECIFIC_EXTRACTORS = [
     wechat_channels,
     douyin,
+    kuaishou,
     # bilibili,   # 未来按需新增
     # tiktok,
 ]
