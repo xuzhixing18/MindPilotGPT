@@ -19,6 +19,7 @@
 
 from __future__ import annotations
 
+import logging
 import mimetypes
 import os
 import re
@@ -43,24 +44,50 @@ _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from backend import ai, auth, comments, downloader, library, notes, seo, share, storage, transcribe
+from backend import ai, auth, comments, downloader, library, netguard, notes, ratelimit, seo, share, storage, transcribe
 from backend.downloader.common import DOWNLOAD_DIR
 
 # 前端静态目录：项目根目录下的 frontend/
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
+
+log = logging.getLogger(__name__)
 
 app = FastAPI(title="MindPilot 视频下载", version="0.1.0")
 
 # 初始化存储层（建目录/建表，幂等）；失败不阻断启动，仅在 /api/health 反映
 _DB_READY = storage.init_db()
 
+# 风控中间件（P0）：IP 级滑动窗口限流，先注册 → 仅 CORS 在其外层（预检请求不计数）。
+# 只对策略表内路由生效；/api/health、/api/auth、静态资源不在表内，天然跳过。
+app.add_middleware(ratelimit.RateLimitMiddleware)
+
+
+def _cors_allow_origins() -> list[str]:
+    """CORS 白名单（P0）：显式配置 > PUBLIC_BASE_URL 推导 > "*" 兜底。
+
+    "*" 兜底维持既有同源/分离部署体验（浏览器同源请求不触发 CORS 校验），
+    生产建议显式配置 CORS_ALLOW_ORIGINS 收紧（评审 P0-3）。
+    """
+    explicit = [o.strip() for o in (os.getenv("CORS_ALLOW_ORIGINS") or "").split(",") if o.strip()]
+    if explicit:
+        return explicit
+    public = (os.getenv("PUBLIC_BASE_URL") or "").strip().rstrip("/")
+    if public:
+        return [public]
+    log.warning("CORS_ALLOW_ORIGINS 与 PUBLIC_BASE_URL 均未配置，CORS 回退为 *（生产建议显式收紧）")
+    return ["*"]
+
+
 # 允许跨域，便于前端分离部署或本地调试
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_cors_allow_origins(),
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# 应用重载/测试隔离：清空进程内限流计数（对在途请求无副作用）
+ratelimit.reset()
 
 # 认证能力包：注册 /api/auth/* 路由与语义化异常处理器。
 # AUTH_ENABLED 默认 false——既有开放端点行为不变；auth 异常按 MRO 统一映射为 HTTP。
@@ -95,6 +122,10 @@ app.include_router(seo.router)
 #   AUTH_ENABLED=true + ALLOW_ANONYMOUS=false→ 未登录访问一律 401，前端据此弹登录框。
 # 依赖按请求缓存（use_cache 默认），多个端点复用同一 Depends 实例不会重复解析会话。
 _AUTH_GATE = Depends(auth.require_user_if_enabled)
+# 用户级速率与重活并发闸（P0 风控）：与 _AUTH_GATE 复用同一 require_user_if_enabled
+# 依赖（FastAPI 按请求缓存结果，不重复解析会话）；匿名请求由 IP 中间件兜底。
+_USER_RATE = Depends(ratelimit.check_user_rate)
+_HEAVY_GATE = Depends(ratelimit.heavy_gate)
 
 
 def _cleanup(path_str: str) -> None:
@@ -114,6 +145,24 @@ def _flag(v: Any, default: bool = False) -> bool:
     return v is True or v == 1 or v == "true"
 
 
+def _require_public_url(url: str) -> str:
+    """SSRF 统一收口（P0）：所有带 url 入参的业务端点先过 netguard 再进缓存/下载。
+
+    校验放在缓存查找之前——历史缓存可能存有加固前写入的内网链接，读缓存会
+    绕过防护，必须前置拦截。
+    """
+    try:
+        return netguard.require_public_url(url)
+    except netguard.UnsafeURLError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _internal_error(op: str, exc: Exception) -> HTTPException:
+    """500 脱敏（P0）：完整异常只进服务端日志，对外统一文案，不泄露内部细节。"""
+    log.error("%s失败: %r", op, exc)
+    return HTTPException(status_code=500, detail=f"{op}暂时不可用，请稍后重试。")
+
+
 @app.get("/api/health")
 def health() -> dict:
     """健康检查：告知前端 ffmpeg（影响高清合并）、AI 总结与 ASR 兜底是否可用。"""
@@ -128,6 +177,8 @@ def health() -> dict:
         "auth": auth.auth_enabled(),
         # 前端据此决定是否弹登录框拦截解析（与后端门禁同一判据）
         "auth_required": auth.auth_required(),
+        # 业务限流总开关（P0 风控）
+        "ratelimit": ratelimit.enabled(),
     }
 
 
@@ -225,6 +276,7 @@ def get_info(
     url: str = Query(..., min_length=1, description="视频链接"),
     refresh: bool = Query(False, description="跳过缓存强制重新解析"),
     user: auth.CurrentUser = _AUTH_GATE,
+    _rate: None = _USER_RATE,
 ) -> JSONResponse:
     """解析视频信息（带 DB 缓存）。同步 def → 由 Starlette 线程池执行。
 
@@ -232,6 +284,7 @@ def get_info(
     提取；未命中/过期才实时解析并回写。下载仍走实时解析，保证直链新鲜。
     响应附带 ``content_key``（=transcript_key(url)）供前端「加入合集」使用。
     """
+    url = _require_public_url(url)
     key = storage.transcript_key(url)
     if not refresh:
         cached = storage.repo.get_info(key)
@@ -242,7 +295,7 @@ def get_info(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001 兜底，避免把堆栈直接暴露给前端
-        raise HTTPException(status_code=500, detail=f"解析出错：{exc}") from exc
+        raise _internal_error("解析服务", exc) from exc
     storage.repo.put_info(key, data, url, storage.normalize_url(url))
     return JSONResponse({**data, "content_key": key})
 
@@ -252,6 +305,8 @@ def post_download(
     url: str = Body(..., embed=True, min_length=1),
     format_id: str | None = Body(None, embed=True),
     user: auth.CurrentUser = _AUTH_GATE,
+    _rate: None = _USER_RATE,
+    _heavy: None = _HEAVY_GATE,
 ) -> FileResponse:
     """服务端下载并流式回传文件（POST/JSON 形式）。"""
     return _download_response(url, format_id)
@@ -262,6 +317,8 @@ def get_download(
     url: str = Query(..., min_length=1),
     format_id: str | None = Query(None),
     user: auth.CurrentUser = _AUTH_GATE,
+    _rate: None = _USER_RATE,
+    _heavy: None = _HEAVY_GATE,
 ) -> FileResponse:
     """服务端下载并流式回传文件（GET 形式）。
 
@@ -273,12 +330,13 @@ def get_download(
 
 def _download_response(url: str, format_id: str | None) -> FileResponse:
     """下载并构造 FileResponse 的公共逻辑。"""
+    url = _require_public_url(url)
     try:
         result = downloader.download(url, format_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=f"下载出错：{exc}") from exc
+        raise _internal_error("下载服务", exc) from exc
 
     return FileResponse(
         path=result["filepath"],
@@ -398,14 +456,16 @@ def get_stream(
     request: Request,
     url: str = Query(..., min_length=1, description="视频链接"),
     user: auth.CurrentUser = _AUTH_GATE,
+    _rate: None = _USER_RATE,
 ) -> Response:
     """在线流式播放：磁盘缓存 + HTTP Range 分块回传（供前端原生 <video> 播放/seek）。"""
+    url = _require_public_url(url)
     try:
         path = _stream_file(url)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=f"播放源获取失败：{exc}") from exc
+        raise _internal_error("播放服务", exc) from exc
     return _range_response(path, request.headers.get("range"))
 
 
@@ -414,15 +474,18 @@ def post_transcribe(
     url: str = Body(..., embed=True, min_length=1),
     refresh: Any = Body(False, embed=True),
     user: auth.CurrentUser = _AUTH_GATE,
+    _rate: None = _USER_RATE,
+    _heavy: None = _HEAVY_GATE,
 ) -> JSONResponse:
     """提取视频字幕（转写）。同步 def → 由 Starlette 线程池执行，避免阻塞事件循环。"""
+    url = _require_public_url(url)
     refresh = _flag(refresh)
     try:
         data = transcribe.transcribe(url, refresh=refresh)
     except ValueError as exc:  # TranscribeError 继承自 ValueError
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=f"转写出错：{exc}") from exc
+        raise _internal_error("转写服务", exc) from exc
     resp = JSONResponse(data)
     if user.is_authenticated:
         # 历史记录异步写：不拖主响应、容忍丢（辅助数据）
@@ -439,8 +502,11 @@ def post_summarize(
     refresh: Any = Body(False, embed=True),
     refresh_transcribe: Any = Body(None, embed=True, description="字幕层是否重跑；None=跟随 refresh。总结 Tab 的「重新生成」传 false 只重算总结，不级联重做 ASR"),
     user: auth.CurrentUser = _AUTH_GATE,
+    _rate: None = _USER_RATE,
+    _heavy: None = _HEAVY_GATE,
 ) -> JSONResponse:
     """一站式：提取字幕 → 调用大模型生成结构化总结（摘要/要点/章节）。"""
+    url = _require_public_url(url)
     refresh = _flag(refresh)
     tr_refresh = refresh if refresh_transcribe is None else _flag(refresh_transcribe)
     try:
@@ -448,7 +514,7 @@ def post_summarize(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=f"转写出错：{exc}") from exc
+        raise _internal_error("转写服务", exc) from exc
 
     try:
         cfg = auth.ai_override_cfg(user)
@@ -459,7 +525,7 @@ def post_summarize(
     except ai.SummarizeError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=f"总结出错：{exc}") from exc
+        raise _internal_error("总结服务", exc) from exc
 
     resp = JSONResponse({
         "title": tr.get("title"),
@@ -485,8 +551,11 @@ def post_mindmap(
     refresh: Any = Body(False, embed=True),
     refresh_transcribe: Any = Body(None, embed=True, description="字幕层是否重跑；None=跟随 refresh。导图 Tab 的「重新生成」传 false 只重算导图，不级联重做 ASR"),
     user: auth.CurrentUser = _AUTH_GATE,
+    _rate: None = _USER_RATE,
+    _heavy: None = _HEAVY_GATE,
 ) -> JSONResponse:
     """一站式：提取字幕 → 调用大模型生成层级思维导图（带缓存）。"""
+    url = _require_public_url(url)
     refresh = _flag(refresh)
     tr_refresh = refresh if refresh_transcribe is None else _flag(refresh_transcribe)
     try:
@@ -494,7 +563,7 @@ def post_mindmap(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=f"转写出错：{exc}") from exc
+        raise _internal_error("转写服务", exc) from exc
 
     try:
         cfg = auth.ai_override_cfg(user)
@@ -505,7 +574,7 @@ def post_mindmap(
     except ai.MindmapError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=f"思维导图出错：{exc}") from exc
+        raise _internal_error("导图服务", exc) from exc
 
     resp = JSONResponse({
         "title": tr.get("title"),
@@ -525,14 +594,17 @@ def post_mindmap(
 def post_mindmap_xmind(
     url: str = Body(..., embed=True, min_length=1),
     user: auth.CurrentUser = _AUTH_GATE,
+    _rate: None = _USER_RATE,
+    _heavy: None = _HEAVY_GATE,
 ) -> Response:
     """导图（缓存优先）+ 章节时间线 → XMind Zen 文件回传，供用户导入 XMind 二次编辑。"""
+    url = _require_public_url(url)
     try:
         tr = transcribe.transcribe(url)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=f"转写出错：{exc}") from exc
+        raise _internal_error("转写服务", exc) from exc
 
     try:
         cfg = auth.ai_override_cfg(user)
@@ -542,7 +614,7 @@ def post_mindmap_xmind(
     except ai.MindmapError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=f"思维导图出错：{exc}") from exc
+        raise _internal_error("导图服务", exc) from exc
 
     full = ai.attach_chapters(mindmap, tr.get("chapters"))
     data = ai.to_xmind_bytes(full)
@@ -561,6 +633,7 @@ def post_qa(
     history: list[dict] | None = Body(None, embed=True),
     session_id: str | None = Body(None, embed=True, description="登录态续聊会话；空则新建"),
     user: auth.CurrentUser = _AUTH_GATE,
+    _rate: None = _USER_RATE,
 ) -> JSONResponse:
     """一站式：提取字幕 → 基于字幕内容回答一个问题（支持多轮上下文）。
 
@@ -568,12 +641,13 @@ def post_qa(
     （history 参数仅作新建会话首轮的兼容回退）；响应附带 session_id 供续聊。
     匿名：行为与改造前完全一致（无状态，history 由前端回传）。
     """
+    url = _require_public_url(url)
     try:
         tr = transcribe.transcribe(url)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=f"转写出错：{exc}") from exc
+        raise _internal_error("转写服务", exc) from exc
 
     if user.is_authenticated:
         try:
@@ -594,7 +668,7 @@ def post_qa(
         except ai.QAError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
         except Exception as exc:  # noqa: BLE001
-            raise HTTPException(status_code=500, detail=f"问答出错：{exc}") from exc
+            raise _internal_error("问答服务", exc) from exc
         return JSONResponse({**result, "session_id": sid})
 
     try:
@@ -604,7 +678,7 @@ def post_qa(
     except ai.QAError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=f"问答出错：{exc}") from exc
+        raise _internal_error("问答服务", exc) from exc
 
     return JSONResponse(result)
 
@@ -615,11 +689,13 @@ def post_comments(
     refresh: Any = Body(False, embed=True),
     limit: int = Body(20, embed=True, ge=1, le=50),
     user: auth.CurrentUser = _AUTH_GATE,
+    _rate: None = _USER_RATE,
 ) -> JSONResponse:
     """抓取视频高赞评论（无大模型）。同步 def → 线程池执行，避免阻塞事件循环。
 
     与总结/导图不同：不依赖 LLM 配置，未配 Key 也能用，故无 503。
     """
+    url = _require_public_url(url)
     refresh = _flag(refresh)
     try:
         data = comments.fetch_comments(url, refresh=refresh, limit=limit)
@@ -631,7 +707,7 @@ def post_comments(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=f"评论抓取出错：{exc}") from exc
+        raise _internal_error("评论服务", exc) from exc
     resp = JSONResponse(data)
     if user.is_authenticated:
         resp.background = BackgroundTask(
