@@ -3,7 +3,9 @@
 缓存命中率的关键在于「同一视频的不同链接形式」能归一到同一个键：
 - 去掉跟踪/分享类查询参数（utm_*、spm、share_* 等），保留真正标识视频的参数
   （如 YouTube 的 ``?v=``）；
-- scheme/host 小写、去 fragment、query 排序，避免顺序差异导致键不同。
+- scheme/host 小写、query 排序；fragment 默认丢弃，但 SPA 哈希路由站点
+  （无真实 path 且 fragment 以 / 开头，如网易云 music.163.com/#/mv?id=）
+  把 fragment 的路由段并入 path/query，避免不同视频塌缩成同一个 host 级键。
 
 规范化只在「能拿到的输入 URL」上做（查缓存必须在真正抓取之前），因此抖音短链
 与其跳转后的规范地址仍可能各存一份——这是可接受的少量冗余。
@@ -34,7 +36,14 @@ def _is_tracking(name: str) -> bool:
 
 
 def normalize_url(url: str) -> str:
-    """把 URL 归一化为缓存键基础串：小写 scheme/host、去 fragment、丢跟踪参数、query 排序。"""
+    """把 URL 归一化为缓存键基础串：小写 scheme/host、丢跟踪参数、query 排序。
+
+    fragment 处理：普通页面锚点（#section、带 path 的 #/route）直接丢弃；
+    但无真实 path 且 fragment 以 / 开头时是 SPA 哈希路由（网易云等），
+    路由与 id 都在 fragment 里，必须并入 path/query——否则
+    ``https://music.163.com/#/mv?id=1`` 与 ``#/mv?id=2`` 会合并成同一个
+    host 级缓存键，命中旧视频的缓存串台返回。
+    """
     url = (url or "").strip()
     if not url:
         return ""
@@ -45,9 +54,17 @@ def normalize_url(url: str) -> str:
     scheme = parts.scheme.lower()
     host = parts.netloc.lower()
     path = parts.path or "/"
+    query = parts.query
+    fragment = parts.fragment
+    if fragment.startswith("/") and path in ("", "/"):
+        # 哈希路由并入真实路径：与不带 # 的等价链接归一一致，消除双写键
+        frag_path, _, frag_query = fragment.partition("?")
+        path = frag_path or "/"
+        if frag_query:
+            query = f"{query}&{frag_query}" if query else frag_query
     kept = [
         (k, v)
-        for (k, v) in parse_qsl(parts.query, keep_blank_values=True)
+        for (k, v) in parse_qsl(query, keep_blank_values=True)
         if not _is_tracking(k)
     ]
     kept.sort()

@@ -66,6 +66,20 @@ def test_normalize_url():
 
     # 去 fragment
     assert "#" not in keys.normalize_url("https://x.com/p?a=1#frag")
+    # 带真实 path 的 fragment 是锚点/子路由，仍按旧行为丢弃
+    assert keys.normalize_url("https://x.com/page#/sub") == "https://x.com/page"
+
+    # SPA 哈希路由（网易云）：无 path 时 fragment 的路由段并入 path/query
+    assert keys.normalize_url("https://music.163.com/#/mv?id=14579633") \
+        == "https://music.163.com/mv?id=14579633"
+    # 与不带 # 的等价链接归一一致（同一视频双写键消除）
+    k_mv1_hash = keys.transcript_key("https://music.163.com/#/mv?id=14579633")
+    assert k_mv1_hash == keys.transcript_key("https://music.163.com/mv?id=14579633")
+    # 不同视频 -> 不同 key（回归：曾都塌缩成 https://music.163.com/ 同一个键，串台返回旧结果）
+    assert k_mv1_hash != keys.transcript_key("https://music.163.com/#/mv?id=5337006")
+    # fragment 路由段里的跟踪参数同样被剔除
+    assert keys.normalize_url("https://music.163.com/#/mv?id=14579633&utm_source=x") \
+        == "https://music.163.com/mv?id=14579633"
 
     # 同一视频不同跟踪参 -> 规范化后一致 -> 同一 key
     k1 = keys.transcript_key("https://www.bilibili.com/video/BV1xx?spm_id_from=333.337&vd_source=abc")
