@@ -489,6 +489,15 @@ def test_no_subtitle_hint():
     print("[asr] no-subtitle hint ok")
 
 
+def test_subtitle_lang_patterns():
+    # 网易云音乐的 LRC 歌词语言码是「lyrics」，必须在请求列表里，
+    # 否则 yt-dlp 过滤后 requested_subtitles 为空 → 误报「未找到字幕」。
+    assert "lyrics" in subtitles._LANG_PATTERNS
+    # QQ音乐等平台的原文/歌词兼容码仍需保留
+    assert "origin" in subtitles._LANG_PATTERNS and "orig" in subtitles._LANG_PATTERNS
+    print("[subtitles] lang patterns ok")
+
+
 if __name__ == "__main__":
     test_config_no_key()
     test_config_providers()
@@ -507,4 +516,5 @@ if __name__ == "__main__":
     test_asr_synthesize_segments()
     test_funasr_sse_parse()
     test_no_subtitle_hint()
+    test_subtitle_lang_patterns()
     print("TRANSCRIBE & AI TEST PASSED")

@@ -19,7 +19,6 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError
 
 from backend import downloader  # 门面：按注册表路由到专用解析器（与下载层同一判据）
@@ -119,9 +118,10 @@ def _ytdlp_audio(url: str) -> tuple[Path, str]:
     subtitles._apply_cookies(opts)  # 复用字幕模块的 Cookie 注入逻辑
 
     try:
-        with YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(url, download=True)
+        info = common.extract_with_retry(opts, url, download=True)
     except DownloadError as exc:
+        if common.is_transient_network_error(exc):
+            raise AudioError(f"下载音频失败：{common.TRANSIENT_NETWORK_HINT}") from exc
         raise AudioError(f"下载音频失败：{exc}") from exc
 
     filepath: Path | None = None
