@@ -10,16 +10,15 @@ MVP 仅做「字幕提取」：B站 / YouTube 等大多数平台的视频都带�
 
 from __future__ import annotations
 
-import os
 import re
 import uuid
 from pathlib import Path
 from typing import Any
 
-from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError
 
 from backend.downloader import common
+from backend.downloader import normalize as normalize_url
 
 # 项目根目录（backend/transcribe/subtitles.py → transcribe → backend → root）
 _ROOT = Path(__file__).resolve().parents[2]
@@ -40,10 +39,14 @@ _LANG_PRIORITY = [
     "zh-Hans", "zh-CN", "zh-Hant", "zh-TW", "zh-HK", "zh",
     "en", "en-US", "en-GB", "en-orig", "ja", "ko",
 ]
-# 向 yt-dlp 请求的字幕语言（通配，尽量覆盖中英与自动字幕）
-_LANG_PATTERNS = ["zh.*", "zh-Hans", "zh-CN", "en.*", "ja", "ko"]
+# 向 yt-dlp 请求的字幕语言（通配，尽量覆盖中英与自动字幕；
+# origin/orig 兼容 QQ音乐等把歌词/原文当「原语言字幕」返回的平台；
+# lyrics 兼容网易云音乐：其 LRC 歌词的语言码就是 lyrics）
+_LANG_PATTERNS = ["zh.*", "zh-Hans", "zh-CN", "en.*", "ja", "ko", "origin", "orig", "lyrics"]
 
 _TAG_RE = re.compile(r"<[^>]+>")  # 去除 VTT 行内标签：<c> <00:00:01.000> 等
+_LRC_TAG_RE = re.compile(r"\[(ti|ar|al|by|offset|re|ve|length):", re.IGNORECASE)
+_LRC_TIME_RE = re.compile(r"\[(\d{1,3}):(\d{1,2})(?:[.:](\d{1,3}))?\]")
 
 
 class TranscribeError(ValueError):
@@ -51,27 +54,11 @@ class TranscribeError(ValueError):
 
 
 def _apply_cookies(opts: dict[str, Any]) -> None:
-    """按需注入 Cookie。
+    """按需注入 Cookie（逻辑已收敛到 downloader.common.apply_cookies）。
 
-    B站等平台的语音字幕（CC / AI 字幕）需登录态才能获取，无 Cookie 时只能拿到弹幕，
-    转写会降级为「未找到字幕」。支持两种方式（二选一，前者优先）：
-    - COOKIE_FILE         ：cookies.txt（Netscape 格式）文件路径
-    - COOKIES_FROM_BROWSER：从浏览器读取，如 chrome / edge / "chrome:Profile 1"
-    未配置时不改动 opts，保持无 Cookie 的降级行为。
+    保留本别名供 audio.py 等既有调用方复用，避免逐个改引用。
     """
-    cookie_file = (os.getenv("COOKIE_FILE") or "").strip()
-    if cookie_file:
-        path = Path(cookie_file).expanduser()
-        if path.is_file():
-            opts["cookiefile"] = str(path)
-            return
-    browser = (os.getenv("COOKIES_FROM_BROWSER") or "").strip()
-    if browser:
-        parts = [p.strip() for p in browser.split(":")]
-        name = parts[0]
-        profile = parts[1] if len(parts) > 1 and parts[1] else None
-        # yt-dlp 约定的四元组：(browser, profile, keyring, container)
-        opts["cookiesfrombrowser"] = (name, profile, None, None)
+    common.apply_cookies(opts)
 
 
 def _subtitle_opts(token: str) -> dict[str, Any]:
@@ -145,6 +132,33 @@ def _parse_subtitle_file(path: Path) -> list[dict[str, Any]]:
     return _dedupe(segments)
 
 
+def _parse_lrc_file(path: Path) -> list[dict[str, Any]]:
+    """解析 LRC 歌词为分段列表（QQ音乐等平台的歌词字幕格式）。
+
+    LRC 形如：[ti:歌名] [ar:歌手] 元数据行 + [mm:ss.cc]歌词行；
+    一行可带多个时间戳（重复副歌）；行尾用「下一行起点」作 end，
+    末行无后继时给 4 秒默认时长。
+    """
+    raw = path.read_text(encoding="utf-8", errors="ignore").replace("\ufeff", "")
+    rows: list[tuple[float, str]] = []
+    for line in raw.splitlines():
+        if _LRC_TAG_RE.match(line.strip()):
+            continue  # 元数据行（ti/ar/al/offset 等）
+        stamps = _LRC_TIME_RE.findall(line)
+        text = _LRC_TIME_RE.sub("", line).strip()
+        if not text:
+            continue
+        for minutes, seconds, frac in stamps:
+            start = int(minutes) * 60 + float(f"{seconds}.{frac or 0}")
+            rows.append((round(start, 2), text))
+    rows.sort(key=lambda row: row[0])
+    segments: list[dict[str, Any]] = []
+    for index, (start, text) in enumerate(rows):
+        end = rows[index + 1][0] if index + 1 < len(rows) else round(start + 4.0, 2)
+        segments.append({"start": start, "end": end, "text": text})
+    return segments  # 不去重：不同时间戳的重复副歌是歌词有意为之
+
+
 def _dedupe(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """去除自动字幕常见的相邻重复行（滚动式 ASR）。"""
     result: list[dict[str, Any]] = []
@@ -210,11 +224,18 @@ def transcribe(url: str) -> dict[str, Any]:
     :raises TranscribeError: 无字幕或下载/解析失败
     :return: {title, language, source, segments, text, char_count, ...}
     """
+    try:
+        # 平台归一化：壳页报错、分享短链跟随、ryqq_v2/纯数字 ID 改写（yt-dlp 直链不认）
+        url = normalize_url(url)
+    except ValueError as exc:
+        raise TranscribeError(str(exc)) from exc
     token = uuid.uuid4().hex[:12]
     try:
-        with YoutubeDL(_subtitle_opts(token)) as ydl:
-            info = ydl.extract_info(url, download=True)
+        info = common.extract_with_retry(_subtitle_opts(token), url, download=True)
     except DownloadError as exc:
+        if common.is_transient_network_error(exc):
+            raise TranscribeError(
+                f"无法获取该链接的字幕：{common.TRANSIENT_NETWORK_HINT}") from exc
         raise TranscribeError(f"无法获取该链接的字幕：{exc}") from exc
 
     requested = info.get("requested_subtitles") or {}
@@ -228,7 +249,12 @@ def transcribe(url: str) -> dict[str, Any]:
         filepath = sub.get("filepath")
         if not filepath or not Path(filepath).exists():
             raise TranscribeError("字幕文件下载失败，请重试。")
-        segments = _parse_subtitle_file(Path(filepath))
+        sub_path = Path(filepath)
+        # QQ音乐等平台的歌词是 LRC 格式（无 VTT 的 --> 时间轴），单独解析
+        if sub_path.suffix.lower() == ".lrc":
+            segments = _parse_lrc_file(sub_path)
+        else:
+            segments = _parse_subtitle_file(sub_path)
     finally:
         _cleanup(requested)  # 无论成功与否都清理临时字幕
 

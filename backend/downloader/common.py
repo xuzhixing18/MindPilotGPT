@@ -8,11 +8,17 @@ generic（通用 / yt-dlp）与各平台专用解析器（douyin 等）共用的
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import tempfile
+import time
 from functools import lru_cache
 from pathlib import Path
+from typing import Any
+
+from yt_dlp import YoutubeDL
+from yt_dlp.utils import DownloadError
 
 # 下载临时目录：所有服务端下载文件先落到这里，回传完成后由接口清理
 DOWNLOAD_DIR = Path(tempfile.gettempdir()) / "mindpilot_downloads"
@@ -54,3 +60,89 @@ def sanitize_filename(name: str, default: str = "video") -> str:
     cleaned = re.sub(r'[\\/:*?"<>|\r\n\t]', "_", name or "")
     cleaned = cleaned.strip().rstrip(".")[:120]  # 去首尾空白与结尾点，并限制长度
     return cleaned or default
+
+
+def apply_cookies(opts: dict[str, Any]) -> None:
+    """按需向 yt-dlp 参数注入登录态 Cookie（二选一，前者优先）。
+
+    B站等平台的会员内容、QQ音乐 VIP 歌曲需登录态才能解析，无 Cookie 时
+    保持匿名降级行为。支持两种来源：
+    - COOKIE_FILE         ：cookies.txt（Netscape 格式）文件路径
+    - COOKIES_FROM_BROWSER：从浏览器读取，如 chrome / edge / "chrome:Profile 1"
+    未配置或不生效时不改动 opts。
+    """
+    cookie_file = (os.getenv("COOKIE_FILE") or "").strip()
+    if cookie_file:
+        path = Path(cookie_file).expanduser()
+        if path.is_file():
+            opts["cookiefile"] = str(path)
+            return
+    browser = (os.getenv("COOKIES_FROM_BROWSER") or "").strip()
+    if browser:
+        parts = [p.strip() for p in browser.split(":")]
+        name = parts[0]
+        profile = parts[1] if len(parts) > 1 and parts[1] else None
+        # yt-dlp 约定的四元组：(browser, profile, keyring, container)
+        opts["cookiesfrombrowser"] = (name, profile, None, None)
+
+
+def cookies_configured() -> bool:
+    """登录态 Cookie 是否已配置（与 apply_cookies 同一判据，供付费预检复用）。"""
+    cookie_file = (os.getenv("COOKIE_FILE") or "").strip()
+    if cookie_file and Path(cookie_file).expanduser().is_file():
+        return True
+    return bool((os.getenv("COOKIES_FROM_BROWSER") or "").strip())
+
+
+# ---- yt-dlp 提取级临时网络故障重试 ----
+# 网易云音乐等平台接口会偶发「Remote end closed connection without response」类
+# 连接重置，重置窗口通常只有几秒；但 yt-dlp 的提取阶段
+# （YoutubeDL._handle_extraction_exceptions）对网络错误不做任何重试
+# （'retries' 参数只作用于文件下载阶段），一次失败即整体报错。
+# 因此在各调用点（解析/字幕/音频兜底）外包一层带间隔的重试。
+
+NETWORK_RETRY_ATTEMPTS = 5  # 总尝试次数（含首次），最后一次重试在第 ~15 秒
+NETWORK_RETRY_DELAY = 1.5   # 重试间隔基数（秒），随重试次数递增
+
+# 「重试有机会成功」的临时故障签名。平台明确的业务错误（Unsupported URL /
+# 登录要求 / 无可用格式等）不在此列，避免空转重试掩盖真实问题。
+_TRANSIENT_NETWORK_SIGNATURES = (
+    "RemoteDisconnected",
+    "Remote end closed connection without response",
+    "Connection aborted",
+    "Connection reset by peer",
+    "timed out",
+    "Read timed out",
+    "HTTP Error 502",
+    "HTTP Error 503",
+    "HTTP Error 504",
+)
+
+TRANSIENT_NETWORK_HINT = "网络连接被服务端中断，已自动重试多次仍失败，请稍后重试。"
+
+
+def is_transient_network_error(exc: BaseException) -> bool:
+    """是否为临时性网络故障（连接被重置/中断/超时、网关 5xx）。"""
+    msg = str(exc)
+    return any(sig in msg for sig in _TRANSIENT_NETWORK_SIGNATURES)
+
+
+def extract_with_retry(opts: dict[str, Any], url: str, *, download: bool):
+    """yt-dlp extract_info + 临时网络故障重试（解析/字幕/音频各调用点共用）。
+
+    临时故障按 NETWORK_RETRY_DELAY 递增间隔重试 NETWORK_RETRY_ATTEMPTS 次；
+    非临时错误立即抛出；重试耗尽后抛出最后一次的 DownloadError，由调用点
+    按既有文案包装（无法解析 / 无法获取字幕 / 下载音频失败）。
+    """
+    last_exc: DownloadError | None = None
+    for attempt in range(NETWORK_RETRY_ATTEMPTS):
+        try:
+            with YoutubeDL(opts) as ydl:
+                return ydl.extract_info(url, download=download)
+        except DownloadError as exc:
+            if not is_transient_network_error(exc):
+                raise
+            last_exc = exc
+            if attempt + 1 < NETWORK_RETRY_ATTEMPTS:
+                time.sleep(NETWORK_RETRY_DELAY * (attempt + 1))
+    raise last_exc  # type: ignore[misc]

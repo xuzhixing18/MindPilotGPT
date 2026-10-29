@@ -4,6 +4,7 @@
     from backend import downloader
     downloader.extract_info(url)          # 解析视频信息
     downloader.download(url, format_id)   # 服务端下载
+    downloader.normalize(url)             # 平台归一化（壳页报错/短链跟随/ID 改写）
     downloader.ffmpeg_available()         # ffmpeg 能力（影响高清合并）
 
 调度规则：按 registry.SPECIFIC_EXTRACTORS 顺序用 can_handle(url) 匹配专用解析器
@@ -15,10 +16,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from backend.downloader import generic, registry
+from backend.downloader import generic, registry, netease
 from backend.downloader.common import ffmpeg_available
 
-__all__ = ["extract_info", "download", "ffmpeg_available"]
+__all__ = ["extract_info", "download", "normalize", "ffmpeg_available"]
 
 
 def _pick(url: str):
@@ -27,6 +28,17 @@ def _pick(url: str):
         if mod.can_handle(url):
             return mod
     return generic
+
+
+def normalize(url: str) -> str:
+    """交给平台专用解析器归一化 URL（壳页报错、短链跟随、数字 ID 改写）。
+
+    未命中专用解析器（无 normalize 能力的模块）则原样返回，供 yt-dlp 直链路径
+    （如 transcribe）复用。
+    """
+    handler = _pick(url)
+    normalize_fn = getattr(handler, "normalize", None)
+    return normalize_fn(url) if normalize_fn else url
 
 
 def extract_info(url: str) -> dict[str, Any]:

@@ -13,11 +13,11 @@
 
 from __future__ import annotations
 
+import re
 import uuid
 from pathlib import Path
 from typing import Any
 
-from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError
 
 from backend.downloader import common
@@ -46,6 +46,7 @@ def _base_opts() -> dict[str, Any]:
     if ffmpeg:
         # 指向探测到的 ffmpeg（含 imageio-ffmpeg 内置二进制）
         opts["ffmpeg_location"] = ffmpeg
+    common.apply_cookies(opts)  # 登录态注入（VIP 歌曲等需本人 Cookie）
     return opts
 
 
@@ -57,9 +58,25 @@ def _format_resolution(fmt: dict[str, Any]) -> str:
     res = fmt.get("resolution")
     if res and res != "audio only":
         return res
+    m = _P_RES_FMT.match(str(fmt.get("format_id") or ""))
+    if m:
+        return m.group(0)  # 编码缺失的整文件流（如网易云 MV）：format_id 即清晰度
     if fmt.get("vcodec") in (None, "none"):
         return "audio"
     return "unknown"
+
+
+_P_RES_FMT = re.compile(r"^(\d+)p$", re.IGNORECASE)
+
+
+def _looks_video(fmt: dict[str, Any]) -> bool:
+    """编码字段缺失时，凭分辨率/format_id 判定视频流（网易云 MV 不填 vcodec/acodec）。"""
+    if fmt.get("height") or fmt.get("width"):
+        return True
+    res = fmt.get("resolution")
+    if res and res != "audio only":
+        return True
+    return bool(_P_RES_FMT.match(str(fmt.get("format_id") or "")))
 
 
 def _collect_formats(info: dict[str, Any]) -> list[dict[str, Any]]:
@@ -74,8 +91,10 @@ def _collect_formats(info: dict[str, Any]) -> list[dict[str, Any]]:
     for fmt in info.get("formats") or []:
         vcodec = fmt.get("vcodec")
         acodec = fmt.get("acodec")
-        has_video = vcodec not in (None, "none")
-        has_audio = acodec not in (None, "none")
+        codec_unknown = vcodec is None and acodec is None
+        has_video = vcodec not in (None, "none") or (codec_unknown and _looks_video(fmt))
+        # 编码缺失的整文件流（网易云 MV 等）默认自带音轨，按单文件含声音处理
+        has_audio = acodec not in (None, "none") or (codec_unknown and has_video)
 
         # 跳过纯音频（后面单独处理）与无扩展名的流
         ext = fmt.get("ext")
@@ -88,13 +107,15 @@ def _collect_formats(info: dict[str, Any]) -> list[dict[str, Any]]:
             continue
 
         resolution = _format_resolution(fmt)
+        m = _P_RES_FMT.match(str(fmt.get("format_id") or ""))
+        height = fmt.get("height") or (int(m.group(1)) if m else 0)
         key = (resolution, ext, progressive)
         # 同一清晰度取体积更大的（通常质量更好）
         candidate = {
             "format_id": fmt.get("format_id"),
             "ext": ext,
             "resolution": resolution,
-            "height": fmt.get("height") or 0,
+            "height": height,
             "filesize": fmt.get("filesize") or fmt.get("filesize_approx"),
             "has_audio": has_audio,
             "progressive": progressive,
@@ -116,6 +137,8 @@ def _collect_audio_option(info: dict[str, Any]) -> dict[str, Any] | None:
     for fmt in info.get("formats") or []:
         if fmt.get("vcodec") not in (None, "none"):
             continue
+        if fmt.get("vcodec") is None and fmt.get("acodec") is None and _looks_video(fmt):
+            continue  # 编码缺失的视频流（网易云 MV）：已在视频列表，不冒充仅音频
         if best_audio is None:
             best_audio = fmt
         else:
@@ -136,21 +159,24 @@ def _collect_audio_option(info: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
-def extract_info(url: str) -> dict[str, Any]:
-    """解析视频链接，返回标题、封面、时长与可选清晰度列表。
+def extract_raw(url: str) -> dict[str, Any]:
+    """yt-dlp 原始提取：只取 info dict，不做任何后处理（供专用解析器复用）。
 
-    对应接口 GET /api/info。此步骤不下载文件 (download=False)。
-    平台路由由包门面 __init__.py 负责，本函数只处理走 yt-dlp 的通用情形。
+    专用解析器（如 qqmusic）在修完元数据后调 build_info 得到统一结构，
+    避免复制整套格式整理逻辑。
     """
     opts = _base_opts()
     opts["skip_download"] = True
-
     try:
-        with YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(url, download=False)
+        return common.extract_with_retry(opts, url, download=False)
     except DownloadError as exc:
+        if common.is_transient_network_error(exc):
+            raise ValueError(f"无法解析该链接：{common.TRANSIENT_NETWORK_HINT}") from exc
         raise ValueError(f"无法解析该链接：{exc}") from exc
 
+
+def build_info(info: dict[str, Any], url: str) -> dict[str, Any]:
+    """把 yt-dlp 的原始 info dict 整理成统一返回结构（extract_info 的后半段）。"""
     formats = _collect_formats(info)
     audio = _collect_audio_option(info)
     if audio:
@@ -169,6 +195,15 @@ def extract_info(url: str) -> dict[str, Any]:
         "ffmpeg_available": common.ffmpeg_available(),
         "formats": formats,
     }
+
+
+def extract_info(url: str) -> dict[str, Any]:
+    """解析视频链接，返回标题、封面、时长与可选清晰度列表。
+
+    对应接口 GET /api/info。此步骤不下载文件 (download=False)。
+    平台路由由包门面 __init__.py 负责，本函数只处理走 yt-dlp 的通用情形。
+    """
+    return build_info(extract_raw(url), url)
 
 
 def download(url: str, format_id: str | None = None) -> dict[str, Any]:
@@ -211,9 +246,10 @@ def download(url: str, format_id: str | None = None) -> dict[str, Any]:
         opts["merge_output_format"] = "mp4"
 
     try:
-        with YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(url, download=True)
+        info = common.extract_with_retry(opts, url, download=True)
     except DownloadError as exc:
+        if common.is_transient_network_error(exc):
+            raise ValueError(f"下载失败：{common.TRANSIENT_NETWORK_HINT}") from exc
         raise ValueError(f"下载失败：{exc}") from exc
 
     # 现代 yt-dlp 会把最终文件路径写入 requested_downloads
